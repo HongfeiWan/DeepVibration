@@ -1,8 +1,8 @@
 
 
 <p align="center">
-    <a href="https://github.com/HongfeiWan/DeepViberation" target="_blank">
-        <img src="https://github.com/HongfeiWan/DeepViberation/blob/main/images/Logo.png" width="1000">
+    <a href="https://github.com/HongfeiWan/DeepVibration" target="_blank">
+        <img src="https://github.com/HongfeiWan/DeepVibration/tree/main/imgaes/Logo.png" width="1000">
     </a>
 </p>
 <p align="center">
@@ -13,6 +13,7 @@
         <img src="https://img.shields.io/badge/cudapython-13.0.1-brightgreen.svg">
     </a>
 </p>
+
 
 # DeepVibration
 
