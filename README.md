@@ -12,6 +12,9 @@
     <a href="https://github.com/NVIDIA/cuda-python">
         <img src="https://img.shields.io/badge/cudapython-13.0.1-brightgreen.svg">
     </a>
+    <a href="https://github.com/matlab">
+        <img src="https://img.shields.io/badge/Matlab-2024a-brightgreen.svg">
+    </a>
 </p>
 
 
