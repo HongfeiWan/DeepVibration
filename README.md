@@ -1,7 +1,7 @@
 
 <p align="center">
     <a href="https://github.com/HongfeiWan/DeepVibration" target="_blank">
-        <img src="https://github.com/HongfeiWan/DeepVibration/blob/main/imgaes/Logo.svg" width="1000">
+        <img src="https://github.com/HongfeiWan/DeepVibration/blob/main/imgaes/logo.svg" width="1000">
     </a>
 </p>
 <p align="center">
