@@ -36,7 +36,6 @@ TRIGGER_CHANNEL_LIST = [5]          # 指定要保存的随机触发通道索引
 EVENT_NUMBER = 10000    # 每个bin文件中的理论上事件数
 MAX_WINDOWS = 30000     # 时间窗 120μs （30000个时间点 x 4ns）
 
-
 def bin2rawpulse(run_filename, channel_list, event_number, save_path):
     """
     处理bin文件中对应channel_list通道的原始波形并且保存
