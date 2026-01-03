@@ -9,7 +9,8 @@ import os
 import sys
 import h5py
 import numpy as np
-from typing import Optional, Dict
+import matplotlib.pyplot as plt
+from typing import Optional, Dict, Tuple
 
 # 添加路径以便导入 utils 模块
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -131,6 +132,136 @@ def analyze_inhibit_signals(h5_file: str = None,
         print(f'分析过程中出错: {e}')
         raise
 
+def plot_inhibit_signals(h5_file: str = None,
+                         channel_idx: int = 0,
+                         max_events_to_plot: Optional[int] = 10,
+                         save_path: Optional[str] = None,
+                         show_plot: bool = True,
+                         figsize: Tuple[int, int] = (16, 10)) -> None:
+    """
+    可视化inhibit信号对应的CH0波形
+    
+    参数:
+        h5_file: HDF5 文件路径，如果为None则自动获取CH0-3目录中的第一个文件
+        channel_idx: 通道索引，默认0表示CH0通道
+        max_events_to_plot: 最多绘制的inhibit事件数量，None表示绘制所有
+        save_path: 保存图片路径，如果为None则不保存
+        show_plot: 是否显示图片
+        figsize: 图片大小
+    """
+    # 如果没有指定文件，自动获取CH0-3目录中的第一个文件
+    if h5_file is None:
+        h5_files = get_h5_files()
+        if 'CH0-3' not in h5_files or not h5_files['CH0-3']:
+            raise FileNotFoundError('在 data/hdf5/raw_pulse/CH0-3 目录中未找到 h5 文件')
+        h5_file = h5_files['CH0-3'][0]
+    
+    if not os.path.exists(h5_file):
+        raise FileNotFoundError(f'文件不存在: {h5_file}')
+    
+    print('=' * 70)
+    print(f'可视化Inhibit信号波形')
+    print(f'文件: {os.path.basename(h5_file)}')
+    print('=' * 70)
+    
+    try:
+        # 先分析inhibit信号
+        stats = analyze_inhibit_signals(h5_file, channel_idx)
+        
+        inhibit_count = stats['inhibit_count']
+        inhibit_indices = stats['inhibit_indices']
+        
+        if inhibit_count == 0:
+            print('未发现Inhibit信号，无法绘制')
+            return
+        
+        # 确定要绘制的事件数量
+        if max_events_to_plot is None:
+            num_to_plot = inhibit_count
+        else:
+            num_to_plot = min(max_events_to_plot, inhibit_count)
+        
+        selected_indices = inhibit_indices[:num_to_plot]
+        print(f'\n将绘制 {num_to_plot} 个inhibit信号的波形')
+        
+        # 读取文件获取波形数据
+        with h5py.File(h5_file, 'r') as f:
+            channel_data = f['channel_data']
+            time_samples, num_channels, num_events = channel_data.shape
+            
+            # 参数设置
+            sampling_interval_ns = 4.0  # 4ns per sample
+            sampling_interval_s = sampling_interval_ns * 1e-9
+            time_axis_us = np.arange(time_samples) * sampling_interval_ns / 1000.0  # 转换为微秒
+            
+            # 创建图形
+            n_cols = 3
+            n_rows = (num_to_plot + n_cols - 1) // n_cols
+            fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+            
+            # 如果只有一个subplot，确保axes是数组
+            if num_to_plot == 1:
+                axes = np.array([[axes]])
+            elif n_rows == 1:
+                axes = axes.reshape(1, -1)
+            
+            # 绘制每个inhibit信号的波形
+            for plot_idx, event_idx in enumerate(selected_indices):
+                row = plot_idx // n_cols
+                col = plot_idx % n_cols
+                ax = axes[row, col]
+                
+                # 获取波形数据
+                waveform = channel_data[:, channel_idx, event_idx]
+                min_val = np.min(waveform)
+                max_val = np.max(waveform)
+                mean_val = np.mean(waveform)
+                
+                # 绘制波形
+                ax.plot(time_axis_us, waveform, 'b-', linewidth=0.8, alpha=0.8)
+                
+                # 标注最小值（inhibit信号的关键特征）
+                min_idx = np.argmin(waveform)
+                ax.plot(time_axis_us[min_idx], min_val, 'ro', markersize=6, label=f'Min: {min_val:.1f}')
+                
+                # 设置标题和标签
+                ax.set_xlabel('Time (μs)', fontsize=9)
+                ax.set_ylabel('Amplitude (ADC counts)', fontsize=9)
+                ax.set_title(f'Event #{event_idx} (Inhibit Signal)\n'
+                           f'Min: {min_val:.1f}, Max: {max_val:.1f}, Mean: {mean_val:.1f}',
+                           fontsize=10)
+                ax.grid(True, alpha=0.3)
+                ax.legend(fontsize=8)
+                
+                # 添加0线作为参考
+                ax.axhline(y=0, color='r', linestyle='--', linewidth=1, alpha=0.5)
+            
+            # 隐藏多余的subplot
+            for plot_idx in range(num_to_plot, n_rows * n_cols):
+                row = plot_idx // n_cols
+                col = plot_idx % n_cols
+                axes[row, col].axis('off')
+            
+            plt.suptitle(f'Inhibit Signal Waveforms (CH{channel_idx})\n'
+                        f'Total inhibit events: {inhibit_count}, Showing: {num_to_plot}',
+                        fontsize=12, y=0.995)
+            plt.tight_layout()
+            
+            if save_path:
+                plt.savefig(save_path, dpi=150, bbox_inches='tight')
+                print(f'\n图片已保存至: {save_path}')
+            
+            if show_plot:
+                plt.show()
+            else:
+                plt.close()
+        
+        print(f'\n绘制完成！')
+    
+    except Exception as e:
+        print(f'可视化过程中出错: {e}')
+        raise
+
 # 示例使用
 if __name__ == '__main__':
     # 方法1: 分析单个文件
@@ -143,6 +274,19 @@ if __name__ == '__main__':
             h5_file=None,  # 自动选择CH0-3目录中的第一个文件
             channel_idx=0  # CH0通道
         )
+        
+        # 可视化inhibit信号波形
+        print(f'\n' + '=' * 70)
+        print('可视化Inhibit信号波形')
+        print('=' * 70)
+        
+        plot_inhibit_signals(
+            h5_file=None,  # 自动选择CH0-3目录中的第一个文件
+            channel_idx=0,  # CH0通道
+            max_events_to_plot=10,  # 最多绘制10个inhibit信号
+            show_plot=True
+        )
+
     except Exception as e:
         print(f'分析失败: {e}')
     

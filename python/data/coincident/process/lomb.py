@@ -38,7 +38,6 @@ if os.path.exists(randomtrigger_inhibit_file):
         print(f'警告: 无法导入randomtrigger&inhibit模块: {e}')
         analyze_coincident_events = None
 
-
 def analyze_rt_only_events_lomb_scargle(ch0_3_file: str,
                                         ch5_file: str,
                                         rt_cut: float = 6000.0,
@@ -437,7 +436,6 @@ def analyze_rt_only_events_lomb_scargle(ch0_3_file: str,
         }
         
         return results
-
 
 # 示例使用
 if __name__ == '__main__':
