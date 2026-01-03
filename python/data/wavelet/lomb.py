@@ -124,9 +124,12 @@ def lomb_scargle_analysis(signal_data: np.ndarray,
                           min_freq: float,
                           max_freq: float,
                           detrend: bool = True,
-                          oversampling: float = 2.0) -> Tuple[np.ndarray, np.ndarray]:
+                          oversampling: float = 2.0,
+                          batch_size: Optional[int] = None,
+                          merge_method: str = 'mean') -> Tuple[np.ndarray, np.ndarray]:
     """
     使用Lomb-Scargle方法分析信号（专注于低频分析）
+    支持分批处理，避免降采样并减少内存占用
     
     参数:
         signal_data: 信号数据数组
@@ -135,6 +138,7 @@ def lomb_scargle_analysis(signal_data: np.ndarray,
         max_freq: 最大频率（Hz），必需参数（例如200Hz用于低频分析）
         detrend: 是否去趋势
         oversampling: 过采样因子
+        batch_size: 每批处理的数据点数，如果为None则自动计算（默认50000）
     
     返回:
         (频率数组, 功率谱) 的元组
@@ -155,65 +159,109 @@ def lomb_scargle_analysis(signal_data: np.ndarray,
     min_required_sampling_rate = max_freq * 2.0  # Nyquist最低要求
     print(f'  最低所需采样率: {min_required_sampling_rate:.1f} Hz (Nyquist: max_freq × 2)')
     
-    # 设置最大数据点数限制，避免内存溢出
-    # Lomb-Scargle的计算复杂度是O(N*M)，N是数据点数，M是频率点数
-    # 但首先要确保满足采样率要求
-    max_data_points = 100000  # 最多50万个数据点（提高限制以确保满足采样率要求）
-    
     # 计算当前信号的平均采样率
     if len(timestamps) > 1:
         dt_array = np.diff(timestamps)
         avg_dt = np.mean(dt_array)
         current_sampling_rate = 1.0 / avg_dt
         print(f'  当前平均采样率: {current_sampling_rate:.1e} Hz')
-        
-        # 计算基于目标采样率的降采样因子（优先考虑满足目标采样率）
-        downsample_factor_by_rate = max(1, int(current_sampling_rate / target_sampling_rate))
-        
-        # 计算基于Nyquist要求的最大降采样因子
-        max_downsample_factor = int(current_sampling_rate / min_required_sampling_rate)
-        if max_downsample_factor < 1:
-            max_downsample_factor = 1
-        
-        # 计算基于数据点数的降采样因子（如果数据点太多，但要满足采样率要求）
-        if len(signal_data) > max_data_points:
-            # 计算基于数据点数需要的降采样因子
-            ideal_downsample_by_points = len(signal_data) / max_data_points
-            
-            # 但降采样因子不能超过max_downsample_factor，否则无法满足Nyquist要求
-            downsample_factor_by_points = min(
-                max(1, int(ideal_downsample_by_points)),
-                max_downsample_factor
-            )
-            print(f'  数据点数过多 ({len(signal_data)})，理想降采样因子: {ideal_downsample_by_points:.1f}')
-            print(f'  但受Nyquist限制，最大允许降采样因子: {max_downsample_factor}')
-        else:
-            downsample_factor_by_points = 1
-        
-        # 使用满足采样率要求的降采样因子
-        # 优先满足目标采样率，但如果数据点太多，在满足Nyquist的前提下进行降采样
-        downsample_factor = min(
-            max(downsample_factor_by_rate, downsample_factor_by_points),
-            max_downsample_factor
-        )
-        
-        print(f'  降采样因子: {downsample_factor} (每{downsample_factor}个点取1个)')
-        
-        # 降采样信号和时间戳
-        if downsample_factor > 1:
-            signal_downsampled = signal_data[::downsample_factor]
-            timestamps_downsampled = t_normalized[::downsample_factor]
-            actual_sampling_rate_after_downsample = current_sampling_rate / downsample_factor
-            print(f'  降采样后点数: {len(signal_downsampled)} (从 {len(signal_data)} 点)')
-            print(f'  降采样后采样率: {actual_sampling_rate_after_downsample:.1f} Hz')
-        else:
-            signal_downsampled = signal_data
-            timestamps_downsampled = t_normalized
-            print(f'  无需降采样（当前采样率已足够）')
     else:
-        signal_downsampled = signal_data
-        timestamps_downsampled = t_normalized
-        downsample_factor = 1
+        current_sampling_rate = None
+    
+    # 设置每批处理的数据点数（避免内存溢出）
+    # Lomb-Scargle的计算复杂度是O(N*M)，N是数据点数，M是频率点数
+    if batch_size is None:
+        # 自动计算：确保每批的N*M不会太大（例如不超过5000万）
+        # 假设频率点数约为50000，则每批数据点数约为100000
+        batch_size = 100000  # 默认每批10万个点
+    
+    # 计算总时间跨度（用于频率分辨率）
+    total_duration = t_normalized[-1] - t_normalized[0]
+    
+    # 如果信号太长，使用分批处理（不降采样）
+    if len(signal_data) > batch_size:
+        print(f'\n信号较长 ({len(signal_data)} 点)，使用分批处理模式（不降采样）')
+        print(f'  每批数据点数: {batch_size}')
+        
+        freqs = np.linspace(2 * np.pi * min_freq, 2 * np.pi * max_freq, nfreq)
+        freqs_hz = freqs / (2 * np.pi)
+        
+        print(f'  频率点数: {nfreq}')
+        print(f'  频率分辨率: {freq_resolution:.6f} Hz')
+        
+        # 计算需要多少个批次
+        num_batches = int(np.ceil(len(signal_data) / batch_size))
+        print(f'  总批次数: {num_batches}')
+        
+        # 存储所有批次的功率谱
+        all_power_spectra = []
+        
+        # 分批处理
+        print(f'\n开始分批处理...')
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min(start_idx + batch_size, len(signal_data))
+            
+            # 提取当前批次的数据
+            batch_signal = signal_data[start_idx:end_idx]
+            batch_timestamps = t_normalized[start_idx:end_idx]
+            
+            # 提取非零点
+            non_zero_mask = batch_signal != 0
+            if np.any(non_zero_mask):
+                batch_signal_nonzero = batch_signal[non_zero_mask]
+                batch_timestamps_nonzero = batch_timestamps[non_zero_mask]
+            else:
+                batch_signal_nonzero = batch_signal
+                batch_timestamps_nonzero = batch_timestamps
+            
+            if len(batch_signal_nonzero) < 10:  # 数据点太少，跳过
+                continue
+            
+            # 去趋势
+            if detrend:
+                batch_signal_nonzero = signal.detrend(batch_signal_nonzero)
+            
+            # 对当前批次进行Lomb-Scargle分析
+            batch_power = lombscargle(batch_timestamps_nonzero, batch_signal_nonzero, freqs, normalize=True)
+            all_power_spectra.append(batch_power)
+            
+            if (batch_idx + 1) % 10 == 0 or batch_idx == num_batches - 1:
+                print(f'  已处理 {batch_idx + 1}/{num_batches} 个批次')
+        
+        # 合并所有批次的功率谱
+        if len(all_power_spectra) == 0:
+            raise ValueError('没有有效的批次数据')
+        
+        all_power_spectra = np.array(all_power_spectra)
+        
+        if merge_method == 'mean':
+            # 平均所有批次的功率谱
+            final_power = np.mean(all_power_spectra, axis=0)
+            print(f'\n合并方法: 平均 {len(all_power_spectra)} 个批次的功率谱')
+        elif merge_method == 'max':
+            # 取所有批次的最大值
+            final_power = np.max(all_power_spectra, axis=0)
+            print(f'\n合并方法: 取最大值（{len(all_power_spectra)} 个批次）')
+        else:
+            raise ValueError(f'不支持的合并方法: {merge_method}')
+        
+        # 显示采样率信息
+        if current_sampling_rate:
+            nyquist_freq = current_sampling_rate / 2.0
+            print(f'  保持原始采样率: {current_sampling_rate:.1e} Hz')
+            print(f'  Nyquist频率: {nyquist_freq:.1f} Hz')
+            if nyquist_freq < max_freq:
+                print(f'  警告: Nyquist频率 ({nyquist_freq:.1f} Hz) 低于目标最大频率 ({max_freq:.1f} Hz)！')
+        
+        return freqs_hz, final_power
+    
+    # 如果信号不长，直接处理（不需要分批）
+    print(f'\n信号长度适中，直接处理（不降采样）')
+    
+    # 使用原始信号，不降采样
+    signal_downsampled = signal_data
+    timestamps_downsampled = t_normalized
     
     # 提取非零点（如果有0点的话）
     non_zero_mask = signal_downsampled != 0
@@ -258,16 +306,16 @@ def lomb_scargle_analysis(signal_data: np.ndarray,
     freqs = np.linspace(2 * np.pi * min_freq, 2 * np.pi * max_freq, nfreq)
     print(f'  频率点数: {nfreq}')
     
-    # 显示实际采样率（降采样后）
+    # 显示实际采样率
     if len(signal_nonzero) > 1:
         actual_dt = np.mean(np.diff(timestamps_nonzero))
         actual_sampling_rate = 1.0 / actual_dt
         nyquist_freq = actual_sampling_rate / 2.0
-        print(f'  实际采样率（降采样后）: {actual_sampling_rate:.1f} Hz')
+        print(f'  采样率: {actual_sampling_rate:.1f} Hz')
         print(f'  Nyquist频率: {nyquist_freq:.1f} Hz')
         if nyquist_freq < max_freq:
             print(f'  警告: Nyquist频率 ({nyquist_freq:.1f} Hz) 低于目标最大频率 ({max_freq:.1f} Hz)！')
-            print(f'        可能导致频率混叠，建议降低max_freq或增加数据点数限制')
+            print(f'        可能导致频率混叠，建议降低max_freq')
     
     # Lomb-Scargle周期图
     power = lombscargle(timestamps_nonzero, signal_nonzero, freqs, normalize=True)
@@ -383,11 +431,13 @@ def analyze_filtered_rt_non_inhibit_events(ch0_3_file: str,
                                            ch5_idx: int = 0,
                                            detrend: bool = True,
                                            oversampling: float = 2.0,
+                                           time_window: float = 1.0,
                                            save_path: Optional[str] = None,
                                            show_plot: bool = True,
                                            figsize: Tuple[int, int] = (16, 10)) -> Dict:
     """
     筛选RT且非Inhibit的events，拼接其CH0信号，并进行Lomb-Scargle分析
+    支持按时间窗口切片分析，避免内存溢出
     
     参数:
         ch0_3_file: CH0-3文件路径
@@ -400,6 +450,7 @@ def analyze_filtered_rt_non_inhibit_events(ch0_3_file: str,
         ch5_idx: CH5通道索引
         detrend: 是否去趋势
         oversampling: 过采样因子
+        time_window: 时间窗口长度（秒），用于切片分析，默认1.0秒
         save_path: 保存图片路径
         show_plot: 是否显示图片
         figsize: 图片大小
@@ -431,12 +482,136 @@ def analyze_filtered_rt_non_inhibit_events(ch0_3_file: str,
         event_indices=selected_indices
     )
     
-    # 4. Lomb-Scargle分析
-    freqs, power = lomb_scargle_analysis(
-        concatenated_signal, concatenated_times,
-        min_freq=min_freq, max_freq=max_freq,
-        detrend=detrend, oversampling=oversampling
-    )
+    # 4. 按时间窗口切片并分析
+    total_duration = concatenated_times[-1] - concatenated_times[0]
+    print(f'\n总时间跨度: {total_duration:.6f} s')
+    print(f'时间窗口: {time_window:.2f} s')
+    
+    # 计算需要多少个时间窗口
+    num_windows = int(np.ceil(total_duration / time_window))
+    print(f'将信号分成 {num_windows} 个时间窗口进行分析')
+    
+    # 存储所有窗口的功率谱
+    all_power_spectra = []
+    all_freqs = None
+    
+    # 计算频率网格（基于总时间跨度，保持频率分辨率）
+    freq_resolution = 1.0 / total_duration
+    nfreq = int(oversampling * total_duration * (max_freq - min_freq))
+    if nfreq < 100:
+        nfreq = 100
+    elif nfreq > 50000:
+        nfreq = 50000
+        print(f'  警告: 频率点数限制到 {nfreq} 个点')
+    
+    freqs = np.linspace(2 * np.pi * min_freq, 2 * np.pi * max_freq, nfreq)
+    freqs_hz = freqs / (2 * np.pi)
+    all_freqs = freqs_hz
+    
+    print(f'频率点数: {nfreq}')
+    print(f'频率分辨率: {freq_resolution:.6f} Hz')
+    
+    # 按时间窗口切片分析
+    print(f'\n开始按时间窗口分析...')
+    for window_idx in range(num_windows):
+        window_start_time = concatenated_times[0] + window_idx * time_window
+        window_end_time = min(window_start_time + time_window, concatenated_times[-1])
+        
+        # 找到对应的时间索引
+        start_idx = np.searchsorted(concatenated_times, window_start_time)
+        end_idx = np.searchsorted(concatenated_times, window_end_time, side='right')
+        
+        if end_idx - start_idx < 100:  # 窗口太小，跳过
+            continue
+        
+        # 提取当前窗口的数据
+        window_signal = concatenated_signal[start_idx:end_idx]
+        window_times = concatenated_times[start_idx:end_idx]
+        
+        # 归一化时间（相对于窗口开始）
+        window_times_normalized = window_times - window_times[0]
+        
+        # 提取非零点
+        non_zero_mask = window_signal != 0
+        if np.any(non_zero_mask):
+            window_signal_nonzero = window_signal[non_zero_mask]
+            window_times_nonzero = window_times_normalized[non_zero_mask]
+        else:
+            window_signal_nonzero = window_signal
+            window_times_nonzero = window_times_normalized
+        
+        if len(window_signal_nonzero) < 10:  # 数据点太少，跳过
+            continue
+        
+        # 去趋势
+        if detrend:
+            window_signal_nonzero = signal.detrend(window_signal_nonzero)
+        
+        # 对当前窗口进行Lomb-Scargle分析
+        window_power = lombscargle(window_times_nonzero, window_signal_nonzero, freqs, normalize=True)
+        all_power_spectra.append(window_power)
+        
+        # 绘制当前窗口的分析结果
+        fig_window, axes_window = plt.subplots(2, 2, figsize=(14, 8))
+        
+        # 1. 当前窗口的时域信号
+        ax = axes_window[0, 0]
+        ax.plot(window_times * 1e3, window_signal, 'b-', linewidth=0.5, alpha=0.7)
+        ax.set_xlabel('Time (ms)', fontsize=10)
+        ax.set_ylabel('Amplitude (ADC counts)', fontsize=10)
+        ax.set_title(f'Window {window_idx + 1}/{num_windows}\nTime: {window_start_time:.3f} - {window_end_time:.3f} s\n({len(window_signal)} points)', fontsize=11)
+        ax.grid(True, alpha=0.3)
+        
+        # 2. 当前窗口的频谱（线性尺度）
+        ax = axes_window[0, 1]
+        ax.plot(freqs_hz, window_power, 'b-', linewidth=1)
+        ax.set_xlabel('Frequency (Hz)', fontsize=10)
+        ax.set_ylabel('Power Spectrum', fontsize=10)
+        ax.set_title(f'Lomb-Scargle Power Spectrum (Linear)', fontsize=11)
+        max_display_freq = min(1000, freqs_hz[-1])
+        ax.set_xlim(0, max_display_freq)
+        ax.grid(True, alpha=0.3)
+        
+        # 3. 当前窗口的频谱（对数尺度）
+        ax = axes_window[1, 0]
+        ax.semilogy(freqs_hz, window_power, 'b-', linewidth=1)
+        ax.set_xlabel('Frequency (Hz)', fontsize=10)
+        ax.set_ylabel('Power Spectrum (log scale)', fontsize=10)
+        ax.set_title(f'Lomb-Scargle Power Spectrum (Log Scale)', fontsize=11)
+        ax.set_xlim(0, max_display_freq)
+        ax.grid(True, alpha=0.3)
+        
+        # 4. 当前窗口的频谱（双对数尺度）
+        ax = axes_window[1, 1]
+        ax.loglog(freqs_hz, window_power, 'b-', linewidth=1)
+        ax.set_xlabel('Frequency (Hz)', fontsize=10)
+        ax.set_ylabel('Power Spectrum (log-log scale)', fontsize=10)
+        ax.set_title(f'Lomb-Scargle Power Spectrum (Log-Log)', fontsize=11)
+        ax.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        
+        # 显示当前窗口的结果
+        if show_plot:
+            plt.show(block=False)  # 非阻塞显示，可以继续处理下一个窗口
+            plt.pause(0.5)  # 短暂暂停以便查看
+        
+        plt.close(fig_window)  # 关闭当前窗口的图，释放内存
+        
+        if (window_idx + 1) % 10 == 0 or window_idx == num_windows - 1:
+            print(f'  已处理 {window_idx + 1}/{num_windows} 个时间窗口')
+    
+    # 合并所有窗口的功率谱
+    if len(all_power_spectra) == 0:
+        raise ValueError('没有有效的时间窗口数据')
+    
+    all_power_spectra = np.array(all_power_spectra)
+    
+    # 平均所有窗口的功率谱
+    power = np.mean(all_power_spectra, axis=0)
+    print(f'\n合并 {len(all_power_spectra)} 个时间窗口的功率谱（平均）')
+    
+    freqs = all_freqs
     
     # 5. 绘制结果
     fig, axes = plt.subplots(3, 2, figsize=figsize)
