@@ -147,39 +147,42 @@ def analyze_all_events_wavelet(h5_file: str = None,
     # 使用searchsorted快速查找（向量化操作）
     uniform_indices = np.searchsorted(uniform_times, all_time_stamps, side='left')
     
-    # 并行映射原始数据点到降采样网格
+    # 并行映射原始数据点到降采样网格（返回索引和值，避免创建大数组）
     def map_points_to_grid_batch(batch_indices):
-        """批量映射数据点到网格"""
-        batch_signal = np.zeros(num_uniform_points, dtype=np.float64)
+        """批量映射数据点到网格，返回索引和值"""
+        indices_values = []
         for i in batch_indices:
             idx = uniform_indices[i]
             if idx < num_uniform_points:
                 if abs(uniform_times[idx] - all_time_stamps[i]) < tolerance:
-                    batch_signal[idx] = all_signal_values[i]
+                    indices_values.append((idx, all_signal_values[i]))
                 elif idx > 0 and abs(uniform_times[idx - 1] - all_time_stamps[i]) < tolerance:
-                    batch_signal[idx - 1] = all_signal_values[i]
-        return batch_signal
-    
+                    indices_values.append((idx - 1, all_signal_values[i]))
+        return indices_values
+
     # 并行处理映射（分批处理）
     num_points = len(all_time_stamps)
     batch_size = max(10000, num_points // (mp.cpu_count() * 4))  # 每个核心处理多个批次
-    batches = [list(range(i, min(i + batch_size, num_points))) 
+    batches = [list(range(i, min(i + batch_size, num_points)))
                for i in range(0, num_points, batch_size)]
-    
+
     if len(batches) > 1:
         print(f'  使用 {mp.cpu_count()} 个CPU核心并行映射数据点到网格...')
         print(f'  数据点数: {num_points}, 批次大小: {batch_size}, 批次数: {len(batches)}')
-        
+
         batch_results = Parallel(n_jobs=mp.cpu_count(), backend='threading', verbose=0)(
             delayed(map_points_to_grid_batch)(batch) for batch in batches
         )
-        
-        # 合并批次结果
-        for batch_signal in batch_results:
-            uniform_signal += batch_signal
+
+        # 合并批次结果（在主进程中填充数组）
+        for indices_values_list in batch_results:
+            for idx, value in indices_values_list:
+                uniform_signal[idx] = value
     else:
         # 如果只有一批，直接处理
-        uniform_signal = map_points_to_grid_batch(batches[0])
+        indices_values = map_points_to_grid_batch(batches[0])
+        for idx, value in indices_values:
+            uniform_signal[idx] = value
     
     print(f'\n降采样完成:')
     print(f'  均匀网格点数: {num_uniform_points}')
