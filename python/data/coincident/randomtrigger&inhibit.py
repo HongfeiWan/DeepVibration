@@ -148,8 +148,8 @@ def analyze_coincident_events(ch0_3_file: str,
         rt_mask = ch5_max_values > rt_cut
         rt_count = np.sum(rt_mask)
         
-        # Inhibit信号：CH0最小值 <= 0
-        inhibit_mask = ch0_min_values <= 0
+        # Inhibit信号：CH0最小值 == 0（严格等于0）
+        inhibit_mask = ch0_min_values == 0
         inhibit_count = np.sum(inhibit_mask)
         
         # Coincident信号：同时满足RT和Inhibit条件
@@ -166,7 +166,7 @@ def analyze_coincident_events(ch0_3_file: str,
             print(f'总事件数: {total_events}')
             print(f'\nRandom Trigger 信号数量 (CH5 max > {rt_cut:.2f}): {rt_count}')
             print(f'Random Trigger 信号比例: {rt_count/total_events*100:.2f}%')
-            print(f'\nInhibit 信号数量 (CH0 min <= 0): {inhibit_count}')
+            print(f'\nInhibit 信号数量 (CH0 min == 0): {inhibit_count}')
             print(f'Inhibit 信号比例: {inhibit_count/total_events*100:.2f}%')
             print(f'\nCoincident 信号数量 (同时满足RT和Inhibit): {coincident_count}')
             print(f'Coincident 信号比例: {coincident_count/total_events*100:.2f}%')

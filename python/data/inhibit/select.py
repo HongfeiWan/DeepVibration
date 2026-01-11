@@ -3,7 +3,7 @@
 """
 Inhibit信号分析
 分析CH0-CH3文件中每个事件的CH0信号最小值，判断是否为inhibit信号
-Inhibit信号判断标准：CH0信号的min <= 0
+Inhibit信号判断标准：CH0信号的min == 0（最小值严格等于0）
 """
 import os
 import sys
@@ -77,21 +77,27 @@ def analyze_inhibit_signals(h5_file: str = None,
                 if (i // batch_size + 1) % 10 == 0 or end_idx == num_events:
                     print(f'  已处理 {end_idx}/{num_events} 个事件 ({end_idx/num_events*100:.1f}%)')
             
-            # 判断inhibit信号：min <= 0
-            inhibit_mask = min_values <= 0
+            # 判断inhibit信号：min == 0（最小值严格等于0）
+            inhibit_mask = min_values == 0
             inhibit_count = np.sum(inhibit_mask)
             normal_count = num_events - inhibit_count
             inhibit_rate = inhibit_count / num_events * 100
+            
+            # 统计接近0但不等于0的情况（用于参考）
+            near_zero_mask = (min_values > -1e-6) & (min_values < 0)  # 接近0但不等于0
+            near_zero_count = np.sum(near_zero_mask)
             
             # 打印统计信息
             print(f'\n' + '=' * 70)
             print(f'Inhibit信号分析结果:')
             print(f'=' * 70)
             print(f'总事件数: {num_events}')
-            print(f'Inhibit信号数量 (CH{channel_idx} min <= 0): {inhibit_count}')
-            print(f'正常信号数量 (CH{channel_idx} min > 0): {normal_count}')
+            print(f'Inhibit信号数量 (CH{channel_idx} min == 0): {inhibit_count}')
+            print(f'正常信号数量 (CH{channel_idx} min != 0): {normal_count}')
             print(f'Inhibit信号比例: {inhibit_rate:.2f}%')
             print(f'正常信号比例: {100 - inhibit_rate:.2f}%')
+            if near_zero_count > 0:
+                print(f'\n参考信息: 有 {near_zero_count} 个事件的最小值接近0但不等于0 (范围: (-1e-6, 0))')
             print(f'\nCH{channel_idx}信号最小值统计:')
             print(f'  最小值范围: [{np.min(min_values):.2f}, {np.max(min_values):.2f}]')
             print(f'  平均值: {np.mean(min_values):.2f}')
@@ -100,17 +106,25 @@ def analyze_inhibit_signals(h5_file: str = None,
             # 显示inhibit信号的详细信息
             if inhibit_count > 0:
                 inhibit_min_values = min_values[inhibit_mask]
-                print(f'\nInhibit信号的最小值统计:')
-                print(f'  最小值: {np.min(inhibit_min_values):.2f}')
-                print(f'  最大值: {np.max(inhibit_min_values):.2f}')
-                print(f'  平均值: {np.mean(inhibit_min_values):.2f}')
-                print(f'  中位数: {np.median(inhibit_min_values):.2f}')
+                print(f'\nInhibit信号的最小值统计 (应该全部为0):')
+                print(f'  最小值: {np.min(inhibit_min_values):.10f}')
+                print(f'  最大值: {np.max(inhibit_min_values):.10f}')
+                print(f'  平均值: {np.mean(inhibit_min_values):.10f}')
+                print(f'  中位数: {np.median(inhibit_min_values):.10f}')
+                print(f'  唯一值数量: {len(np.unique(inhibit_min_values))}')
+                if len(np.unique(inhibit_min_values)) > 1:
+                    print(f'  警告: Inhibit信号的最小值不完全为0！唯一值: {np.unique(inhibit_min_values)}')
                 
                 # 找出inhibit事件的索引（前10个）
                 inhibit_indices = np.where(inhibit_mask)[0]
                 print(f'\n前10个Inhibit事件索引: {inhibit_indices[:10].tolist()}')
             else:
-                print(f'\n未发现Inhibit信号！')
+                print(f'\n未发现Inhibit信号（没有事件的最小值严格等于0）！')
+                # 显示最小值最接近0的事件
+                abs_min_values = np.abs(min_values)
+                closest_to_zero_indices = np.argsort(abs_min_values)[:10]
+                print(f'\n最小值最接近0的前10个事件索引: {closest_to_zero_indices.tolist()}')
+                print(f'对应的最小值: {min_values[closest_to_zero_indices].tolist()}')
             
             print('=' * 70)
             

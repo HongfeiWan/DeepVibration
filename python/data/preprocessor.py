@@ -27,8 +27,8 @@ amp_save_path = os.path.join(project_root, 'data', 'hdf5', 'raw_pulse', 'CH0-3')
 trigger_save_path = os.path.join(project_root, 'data', 'hdf5', 'raw_pulse', 'CH5')
 filename_input = '20250520_CEvNS_DZL_sm_pre10000_tri10mV_SA6us0.8x50_SA12us0.8x50_TAout10us1.2x100_TAout10us0.5x3_RT50mHz_NaISA1us1.0x20_plasticsci1-10_bkg'
 
-RUN_Start_NUMBER = 281  # 起始运行编号
-RUN_End_NUMBER = 281    # 结束运行编号
+RUN_Start_NUMBER = 1    # 起始运行编号
+RUN_End_NUMBER = 511    # 结束运行编号
 
 # 定义通道数和事件数
 AMP_CHANNEL_LIST = [0, 1, 2, 3]     # 指定要保存的通道索引（0=CH0, 1=CH1, 2=CH2, 3=CH3）

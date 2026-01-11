@@ -1,0 +1,72 @@
+Date : 2026-01-09 22:42:03
+Directory : d:\Software\Coding\PortableGit\bin\DeepVibration\imgaes
+Total : 24 files,  265410 codes, -395 comments, -1354 blanks, all 263661 lines
+
+Languages
++----------+------------+------------+------------+------------+------------+
+| language | files      | code       | comment    | blank      | total      |
++----------+------------+------------+------------+------------+------------+
+| XML      |          4 |    271,537 |        621 |          3 |    272,161 |
+| Python   |         20 |     -6,127 |     -1,016 |     -1,357 |     -8,500 |
++----------+------------+------------+------------+------------+------------+
+
+Directories
++-----------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| path                                                                                                | files      | code       | comment    | blank      | total      |
++-----------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+| .                                                                                                   |         24 |    265,410 |       -395 |     -1,354 |    263,661 |
+| . (Files)                                                                                           |          4 |    271,537 |        621 |          3 |    272,161 |
+| ..                                                                                                  |         20 |     -6,127 |     -1,016 |     -1,357 |     -8,500 |
+| ..\python                                                                                           |         20 |     -6,127 |     -1,016 |     -1,357 |     -8,500 |
+| ..\python\data                                                                                      |         17 |     -5,720 |       -953 |     -1,267 |     -7,940 |
+| ..\python\data (Files)                                                                              |          1 |       -215 |        -53 |        -51 |       -319 |
+| ..\python\data\coincident                                                                           |          5 |     -1,982 |       -285 |       -428 |     -2,695 |
+| ..\python\data\coincident (Files)                                                                   |          1 |       -507 |        -81 |       -118 |       -706 |
+| ..\python\data\coincident\process                                                                   |          4 |     -1,475 |       -204 |       -310 |     -1,989 |
+| ..\python\data\compressor                                                                           |          1 |       -332 |        -70 |        -74 |       -476 |
+| ..\python\data\inhibit                                                                              |          1 |       -221 |        -31 |        -56 |       -308 |
+| ..\python\data\physical                                                                             |          3 |       -841 |       -141 |       -198 |     -1,180 |
+| ..\python\data\physical (Files)                                                                     |          2 |       -581 |        -93 |       -135 |       -809 |
+| ..\python\data\physical\cut                                                                         |          1 |       -260 |        -48 |        -63 |       -371 |
+| ..\python\data\randomtrigger                                                                        |          1 |       -149 |        -19 |        -32 |       -200 |
+| ..\python\data\sensor                                                                               |          2 |       -748 |       -151 |       -174 |     -1,073 |
+| ..\python\data\sensor\vibration                                                                     |          2 |       -748 |       -151 |       -174 |     -1,073 |
+| ..\python\data\sensor\vibration (Files)                                                             |          1 |       -460 |        -98 |       -107 |       -665 |
+| ..\python\data\sensor\vibration\temperature                                                         |          1 |       -288 |        -53 |        -67 |       -408 |
+| ..\python\data\temperature                                                                          |          2 |       -600 |       -101 |       -112 |       -813 |
+| ..\python\data\temperature (Files)                                                                  |          1 |       -274 |        -47 |        -52 |       -373 |
+| ..\python\data\temperature\power                                                                    |          1 |       -326 |        -54 |        -60 |       -440 |
+| ..\python\data\wavelet                                                                              |          1 |       -632 |       -102 |       -142 |       -876 |
+| ..\python\utils                                                                                     |          3 |       -407 |        -63 |        -90 |       -560 |
++-----------------------------------------------------------------------------------------------------+------------+------------+------------+------------+------------+
+
+Files
++-----------------------------------------------------------------------------------------------------+----------+------------+------------+------------+------------+
+| filename                                                                                            | language | code       | comment    | blank      | total      |
++-----------------------------------------------------------------------------------------------------+----------+------------+------------+------------+------------+
+| d:\Software\Coding\PortableGit\bin\DeepVibration\imgaes\logo.svg                                    | XML      |          1 |          0 |          0 |          1 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\imgaes\rawpulse.svg                                | XML      |    166,863 |        453 |          1 |    167,317 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\imgaes\temperature&power.svg                       | XML      |     52,683 |         91 |          1 |     52,775 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\imgaes\temperature.svg                             | XML      |     51,990 |         77 |          1 |     52,068 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\coincident\process\fft.py              | Python   |       -291 |        -40 |        -61 |       -392 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\coincident\process\hilbert.py          | Python   |       -536 |        -80 |       -103 |       -719 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\coincident\process\lomb.py             | Python   |       -360 |        -56 |        -83 |       -499 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\coincident\process\wavelet.py          | Python   |       -288 |        -28 |        -63 |       -379 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\coincident\randomtrigger&inhibit.py    | Python   |       -507 |        -81 |       -118 |       -706 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\compressor\select.py                   | Python   |       -332 |        -70 |        -74 |       -476 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\inhibit\select.py                      | Python   |       -221 |        -31 |        -56 |       -308 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\physical\cut\overthreshold.py          | Python   |       -260 |        -48 |        -63 |       -371 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\physical\select.py                     | Python   |       -241 |        -40 |        -61 |       -342 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\physical\wavelet.py                    | Python   |       -340 |        -53 |        -74 |       -467 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\preprocessor.py                        | Python   |       -215 |        -53 |        -51 |       -319 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\randomtrigger\distribution.py          | Python   |       -149 |        -19 |        -32 |       -200 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\sensor\vibration\preprocess.py         | Python   |       -460 |        -98 |       -107 |       -665 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\sensor\vibration\temperature\select.py | Python   |       -288 |        -53 |        -67 |       -408 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\temperature\power\unite.py             | Python   |       -326 |        -54 |        -60 |       -440 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\temperature\unite.py                   | Python   |       -274 |        -47 |        -52 |       -373 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\data\wavelet\wavelet.py                     | Python   |       -632 |       -102 |       -142 |       -876 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\utils\__init__.py                           | Python   |          0 |         -1 |         -2 |         -3 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\utils\save.py                               | Python   |        -97 |        -25 |        -16 |       -138 |
+| d:\Software\Coding\PortableGit\bin\DeepVibration\python\utils\visualize.py                          | Python   |       -310 |        -37 |        -72 |       -419 |
+| Total                                                                                               |          |    265,410 |       -395 |     -1,354 |    263,661 |
++-----------------------------------------------------------------------------------------------------+----------+------------+------------+------------+------------+
