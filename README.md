@@ -30,22 +30,55 @@ DeepVibration/
 │   └── src/
 │       └── makeTreeSimpleDZL_V1725.C   # 主要的数据处理和拟合程序
 ├── python/                     # Python 工具集
-│   ├── data/
-│   │   └── preprocessor.py     # 数据预处理：bin转HDF5
-│   └── utils/
+│   ├── data/                   # 数据分析模块
+│   │   ├── preprocessor.py     # 数据预处理：bin转HDF5
+│   │   ├── coincident/         # 符合事件分析
+│   │   │   ├── process/        # 信号处理（FFT、小波、Hilbert、Lomb-Scargle）
+│   │   │   └── randomtrigger&inhibit.py  # RT和Inhibit符合事件分析
+│   │   ├── compressor/         # 制冷机数据分析
+│   │   │   └── select.py       # 制冷机数据读取和筛选
+│   │   ├── inhibit/            # Inhibit信号分析
+│   │   │   └── select.py       # Inhibit信号筛选
+│   │   ├── physical/           # 物理事件分析
+│   │   │   ├── select.py       # 物理事件筛选（既非RT也非Inhibit）
+│   │   │   ├── cut/            # 物理事件筛选条件
+│   │   │   │   └── overthreshold.py  # 过滤过阈值事件
+│   │   │   └── wavelet.py      # 物理事件小波分析
+│   │   ├── randomtrigger/      # 随机触发分析
+│   │   │   └── distribution.py # RT信号分布分析
+│   │   ├── sensor/             # 传感器数据分析
+│   │   │   └── vibration/      # 振动传感器数据
+│   │   │       ├── preprocess.py  # 振动数据预处理（TXT转HDF5）
+│   │   │       └── temperature/   # 振动传感器温度
+│   │   │           └── select.py  # 温度数据读取和筛选
+│   │   ├── temperature/        # 温度数据联合分析
+│   │   │   ├── unite.py        # 振动传感器和制冷机温度联合绘制
+│   │   │   ├── power/          # 温度和功率联合分析
+│   │   │   │   └── unite.py    # 振动传感器温度、制冷机温度和功率联合绘制
+│   │   │   └── countrate/      # 计数率和温度联合分析
+│   │   │       └── unite.py    # bin文件事件计数率和制冷机温度联合绘制
+│   │   └── wavelet/            # 小波分析工具
+│   │       └── wavelet.py      # 通用小波分析
+│   └── utils/                  # 工具模块
 │       ├── save.py             # HDF5数据保存工具
-│       └── visualize.py        # 数据可视化工具
+│       ├── visualize.py        # 数据可视化工具
+│       └── time.py             # 时间工具（bin文件时间读取）
 ├── matlab/                     # MATLAB 分析脚本
 │   ├── Preprocessor/           # 数据预处理脚本
 │   ├── HPGe_signal/            # HPGe信号分析
 │   ├── Viberation_signal/      # 振动信号分析
 │   └── Joint/                  # 联合分析脚本
 ├── data/                       # 数据目录
-│   ├── bin/                    # 原始二进制数据文件
-│   └── hdf5/                   # 处理后的HDF5格式数据
-│       └── raw_pulse/
-│           ├── CH0-3/          # HPGe探测器通道（CH0-CH3）
-│           └── CH5/            # 随机触发通道（CH5）
+│   ├── bin/                    # 原始二进制数据文件（.bin）
+│   ├── hdf5/                   # 处理后的HDF5格式数据
+│   │   └── raw_pulse/
+│   │       ├── CH0-3/          # HPGe探测器通道（CH0-CH3）
+│   │       └── CH5/            # 随机触发通道（CH5）
+│   ├── compressor/             # 制冷机数据
+│   │   └── txt/                # 制冷机文本数据（.txt）
+│   └── vibration/              # 振动传感器数据
+│       ├── txt/                # 振动传感器原始文本数据
+│       └── hdf5/               # 振动传感器处理后的HDF5数据
 └── design/                     # 设计文档
 ```
 
@@ -122,7 +155,89 @@ visualize_multiple_channels('path/to/file.h5',
 python python/utils/visualize.py
 ```
 
-### 3. 数据处理和拟合 (C++)
+### 2.1 信号分析模块 (Python)
+
+#### `python/data/physical/`
+
+**物理事件筛选** (`select.py`): 筛选既非RT也非Inhibit的物理事件
+
+**过阈值过滤** (`cut/overthreshold.py`): 在物理事件基础上，过滤掉过阈值的事件（max(CH0) > 16382）
+
+#### `python/data/inhibit/`
+
+**Inhibit信号分析** (`select.py`): 分析Inhibit信号（CH0最小值 == 0）
+
+#### `python/data/randomtrigger/`
+
+**RT信号分析** (`distribution.py`): 分析随机触发信号的分布
+
+#### `python/data/coincident/`
+
+**符合事件分析** (`randomtrigger&inhibit.py`): 分析RT和Inhibit的符合事件
+
+**信号处理** (`process/`):
+- `fft.py`: FFT频谱分析
+- `hilbert.py`: Hilbert变换分析
+- `lomb.py`: Lomb-Scargle周期图分析
+- `wavelet.py`: 小波变换分析
+
+### 2.2 传感器数据分析 (Python)
+
+#### `python/data/sensor/vibration/`
+
+**振动数据预处理** (`preprocess.py`): 将振动传感器TXT数据转换为HDF5格式
+
+**温度数据读取** (`temperature/select.py`): 读取和筛选振动传感器温度数据
+
+### 2.3 温度数据联合分析 (Python)
+
+#### `python/data/temperature/`
+
+**温度联合绘制** (`unite.py`): 在同一幅图中绘制振动传感器温度和制冷机温度
+
+**温度和功率联合绘制** (`power/unite.py`): 绘制振动传感器温度、制冷机温度（多列）和功率
+
+**计数率和温度联合绘制** (`countrate/unite.py`): 绘制bin文件事件计数率和制冷机Controller温度
+
+### 2.4 工具模块 (Python)
+
+#### `python/utils/time.py`
+
+**时间工具**: 从bin文件读取时间信息并计算时间跨度
+
+**主要功能：**
+- 读取bin文件的起始和结束时间
+- 支持从HDF5文件读取（如果已处理）
+- 批量处理多个bin文件
+
+**使用方法：**
+```python
+from utils.time import get_bin_file_time_span, process_bin_files_time_span
+
+# 获取单个bin文件的时间跨度
+start_time, end_time = get_bin_file_time_span('path/to/file.bin')
+
+# 批量处理多个bin文件
+date_list = process_bin_files_time_span(
+    bin_dir='data/bin',
+    filename_input='20250520_CEvNS_DZL_sm_...',
+    run_start=0,
+    run_end=999
+)
+```
+
+### 3. 制冷机数据分析 (Python)
+
+#### `python/data/compressor/select.py`
+
+读取和分析制冷机数据（温度、功率等）。
+
+**主要功能：**
+- 从TXT文件读取制冷机数据
+- 按日期范围筛选数据
+- 支持多个温度列（Compressor temp、Controller temp、Coldhead temp等）
+
+### 4. 数据处理和拟合 (C++)
 
 #### `C/src/makeTreeSimpleDZL_V1725.C`
 
@@ -167,7 +282,7 @@ const unsigned int THRESHOLD_AC = 1450;    // 触发阈值
 - ROOT 框架（TFile, TTree, TF1, TH1F, TGraph）
 - 自定义头文件：`misc.h`, `tanh_fit.h`
 
-### 4. MATLAB 分析脚本
+### 5. MATLAB 分析脚本
 
 #### 数据预处理 (`matlab/Preprocessor/`)
 - `1.bin2rawpulse.m`: 二进制文件转原始脉冲数据
@@ -190,12 +305,33 @@ const unsigned int THRESHOLD_AC = 1450;    // 触发阈值
 
 ## 数据处理流程
 
-1. **数据采集**: V1725 数据采集卡采集原始二进制数据（`.bin` 文件）
-2. **数据预处理**: 使用 Python `preprocessor.py` 将 `.bin` 文件转换为 HDF5 格式
-3. **数据可视化**: 使用 Python `visualize.py` 检查数据质量和波形
-4. **数据处理**: 使用 C++ `makeTreeSimpleDZL_V1725.C` 进行脉冲拟合和特征提取
-5. **信号分析**: 使用 MATLAB 脚本进行 HPGe 信号和振动信号的统计分析
-6. **联合分析**: 使用 MATLAB 脚本分析 HPGe 信号与振动信号的相关性
+1. **数据采集**: 
+   - V1725 数据采集卡采集原始二进制数据（`.bin` 文件）
+   - 振动传感器采集数据（`.txt` 文件）
+   - 制冷机采集温度、功率等数据（`.txt` 文件）
+
+2. **数据预处理**: 
+   - 使用 Python `preprocessor.py` 将 `.bin` 文件转换为 HDF5 格式
+   - 使用 Python `sensor/vibration/preprocess.py` 将振动传感器TXT数据转换为HDF5格式
+
+3. **数据可视化**: 
+   - 使用 Python `visualize.py` 检查数据质量和波形
+   - 使用 Python `utils/time.py` 查看bin文件的时间跨度
+
+4. **信号分析**: 
+   - 使用 Python `physical/select.py` 筛选物理事件
+   - 使用 Python `inhibit/select.py` 分析Inhibit信号
+   - 使用 Python `randomtrigger/distribution.py` 分析RT信号
+   - 使用 Python `coincident/` 模块分析符合事件
+
+5. **联合分析**: 
+   - 使用 Python `temperature/unite.py` 分析温度数据
+   - 使用 Python `temperature/countrate/unite.py` 分析计数率和温度关系
+   - 使用 Python `coincident/process/` 进行信号处理（FFT、小波、Hilbert等）
+
+6. **数据处理**: 使用 C++ `makeTreeSimpleDZL_V1725.C` 进行脉冲拟合和特征提取
+
+7. **高级分析**: 使用 MATLAB 脚本进行更深入的统计分析和可视化
 
 ## 通道说明
 
@@ -222,6 +358,9 @@ const unsigned int THRESHOLD_AC = 1450;    // 触发阈值
 - numpy
 - h5py
 - matplotlib
+- pandas
+- scipy (用于信号处理)
+- pywt (用于小波变换，可选)
 
 ### C++
 - ROOT 框架（推荐最新版本）
