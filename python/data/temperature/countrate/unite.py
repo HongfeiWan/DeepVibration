@@ -7,6 +7,7 @@ bin文件事件计数率和制冷机Controller温度联合绘制脚本
 import os
 import sys
 import struct
+import glob
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -15,6 +16,7 @@ import matplotlib.ticker as ticker
 from datetime import datetime
 from typing import Optional, Tuple, List
 import importlib.util
+import h5py
 
 # 添加路径以便导入其他模块
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -37,6 +39,42 @@ compressor_select = importlib.util.module_from_spec(spec_compressor)
 spec_compressor.loader.exec_module(compressor_select)
 select_compressor_by_date_range = compressor_select.select_by_date_range
 
+
+def read_hdf5_event_times(hdf5_file_path: str,
+                          epoch_offset: float = 2.082816000000000e+09) -> np.ndarray:
+    """
+    从HDF5文件读取所有event的时间并转换为datetime
+    
+    参数:
+        hdf5_file_path: HDF5文件路径
+        epoch_offset: 时间戳偏移量（默认值来自MATLAB代码）
+    
+    返回:
+        datetime数组，包含所有event的时间
+    """
+    if not os.path.exists(hdf5_file_path):
+        raise FileNotFoundError(f'文件不存在: {hdf5_file_path}')
+    
+    with h5py.File(hdf5_file_path, 'r') as f:
+        if 'time_data' not in f:
+            raise ValueError(f'HDF5文件中缺少 time_data 数据集')
+        
+        time_data = f['time_data'][:]
+        
+        if len(time_data) == 0:
+            raise ValueError(f'HDF5文件中 time_data 为空')
+        
+        # 转换为datetime
+        epoch_start = datetime(1970, 1, 1)
+        event_times = []
+        
+        for time_val in time_data:
+            eventtime = time_val - epoch_offset
+            event_datetime = epoch_start + pd.Timedelta(seconds=eventtime)
+            event_times.append(event_datetime)
+        
+        # 转换为numpy datetime64数组以确保类型一致
+        return pd.to_datetime(event_times).values
 
 def read_bin_event_times(bin_file_path: str,
                          epoch_offset: float = 2.082816000000000e+09,
@@ -155,8 +193,75 @@ def calculate_count_rate(event_times: np.ndarray,
     
     return bin_centers, counts
 
-def plot_countrate_and_temperature(bin_file_path: str,
+def read_all_bin_files_event_times(bin_dir: str,
+                                   hdf5_dir: Optional[str] = None,
+                                   epoch_offset: float = 2.082816000000000e+09) -> np.ndarray:
+    """
+    读取bin文件夹下所有bin文件的事件时间
+    
+    参数:
+        bin_dir: bin文件目录
+        hdf5_dir: HDF5文件目录（如果提供，会优先从HDF5读取）
+        epoch_offset: 时间戳偏移量（默认值来自MATLAB代码）
+    
+    返回:
+        合并后的datetime数组，包含所有bin文件的事件时间
+    """
+    # 查找所有bin文件
+    bin_files = glob.glob(os.path.join(bin_dir, '*.bin'))
+    bin_files.sort()  # 按文件名排序
+    
+    if len(bin_files) == 0:
+        raise ValueError(f'在目录 {bin_dir} 中未找到任何bin文件')
+    
+    print(f'找到 {len(bin_files)} 个bin文件')
+    
+    all_event_times = []
+    
+    for i, bin_file_path in enumerate(bin_files):
+        bin_filename = os.path.basename(bin_file_path)
+        print(f'\n[{i+1}/{len(bin_files)}] 处理: {bin_filename}')
+        
+        # 尝试从HDF5文件读取（如果提供hdf5_dir）
+        event_times = None
+        if hdf5_dir is not None:
+            # 构造HDF5文件路径：{bin_filename}_processed.h5
+            hdf5_filename = f'{os.path.splitext(bin_filename)[0]}_processed.h5'
+            hdf5_path = os.path.join(hdf5_dir, 'CH0-3', hdf5_filename)
+            
+            if os.path.exists(hdf5_path):
+                try:
+                    event_times = read_hdf5_event_times(hdf5_path, epoch_offset)
+                    print(f'  从HDF5文件读取: {len(event_times)} 个events')
+                except Exception as e:
+                    print(f'  警告：从HDF5文件读取失败: {e}，尝试从bin文件读取')
+        
+        # 如果HDF5读取失败或不存在，从bin文件读取
+        if event_times is None:
+            try:
+                event_times = read_bin_event_times(bin_file_path, epoch_offset)
+                print(f'  从bin文件读取: {len(event_times)} 个events')
+            except Exception as e:
+                print(f'  错误：从bin文件读取失败: {e}，跳过此文件')
+                continue
+        
+        all_event_times.extend(event_times)
+    
+    if len(all_event_times) == 0:
+        raise ValueError('未能从任何文件中读取到事件时间')
+    
+    # 转换为numpy datetime64数组并排序（确保类型一致）
+    all_event_times = pd.to_datetime(all_event_times).values
+    all_event_times = np.sort(all_event_times)
+    
+    print(f'\n总共读取到 {len(all_event_times)} 个events')
+    print(f'时间范围: {all_event_times[0]} 到 {all_event_times[-1]}')
+    
+    return all_event_times
+
+def plot_countrate_and_temperature(bin_dir: str,
                                    compressor_file_path: str,
+                                   hdf5_dir: Optional[str] = None,
                                    time_bin_size: str = '1h',
                                    start_date: Optional[str] = None,
                                    end_date: Optional[str] = None,
@@ -170,8 +275,9 @@ def plot_countrate_and_temperature(bin_file_path: str,
     绘制bin文件事件计数率和制冷机Controller温度
     
     参数:
-        bin_file_path: bin文件路径
+        bin_dir: bin文件目录
         compressor_file_path: 制冷机数据文件路径
+        hdf5_dir: HDF5文件目录（如果提供，会优先从HDF5读取）
         time_bin_size: 时间bin大小，pandas频率字符串（如'1h', '30min', '1D'）
         start_date: 起始日期，格式 'YYYY-MM-DD'
         end_date: 终止日期，格式 'YYYY-MM-DD'
@@ -183,17 +289,46 @@ def plot_countrate_and_temperature(bin_file_path: str,
         epoch_offset: 时间戳偏移量（默认值来自MATLAB代码）
     """
     print('=' * 70)
-    print('读取bin文件event时间...')
+    print('读取所有bin文件event时间...')
     print('-' * 70)
     
-    # 读取bin文件event时间
-    event_times = read_bin_event_times(bin_file_path, epoch_offset)
-    print(f'读取到 {len(event_times)} 个events')
-    print(f'时间范围: {event_times[0]} 到 {event_times[-1]}')
+    # 读取所有bin文件的事件时间
+    all_event_times = read_all_bin_files_event_times(bin_dir, hdf5_dir, epoch_offset)
+    
+    # 按日期范围筛选事件时间
+    if start_date is not None or end_date is not None:
+        print(f'\n按日期范围筛选: {start_date} 到 {end_date}')
+        start_datetime = None
+        end_datetime = None
+        
+        if start_date is not None:
+            start_date_str = start_date
+            if start_time is not None:
+                start_date_str = f'{start_date} {start_time}'
+            start_datetime = pd.to_datetime(start_date_str)
+        
+        if end_date is not None:
+            end_date_str = end_date
+            if end_time is not None:
+                end_date_str = f'{end_date} {end_time}'
+            end_datetime = pd.to_datetime(end_date_str)
+        
+        # 筛选时间范围
+        mask = np.ones(len(all_event_times), dtype=bool)
+        if start_datetime is not None:
+            mask = mask & (all_event_times >= start_datetime)
+        if end_datetime is not None:
+            mask = mask & (all_event_times <= end_datetime)
+        
+        all_event_times = all_event_times[mask]
+        print(f'筛选后剩余 {len(all_event_times)} 个events')
+        
+        if len(all_event_times) == 0:
+            raise ValueError('筛选后没有剩余的事件')
     
     # 计算计数率
     print(f'\n计算计数率（时间bin: {time_bin_size}）...')
-    bin_centers, counts = calculate_count_rate(event_times, time_bin_size)
+    bin_centers, counts = calculate_count_rate(all_event_times, time_bin_size)
     print(f'生成了 {len(bin_centers)} 个时间bin')
     
     # 读取制冷机数据
@@ -382,8 +517,8 @@ if __name__ == '__main__':
     project_root = os.path.dirname(great_grandparent_dir)  # 项目根目录
     
     # 设置数据路径
-    bin_file_path = os.path.join(project_root, 'data', 'bin',
-                                 '20250520_CEvNS_DZL_sm_pre10000_tri10mV_SA6us0.8x50_SA12us0.8x50_TAout10us1.2x100_TAout10us0.5x3_RT50mHz_NaISA1us1.0x20_plasticsci1-10_bkgFADC_RAW_Data_465.bin')
+    bin_dir = os.path.join(project_root, 'data', 'bin')
+    hdf5_dir = os.path.join(project_root, 'data', 'hdf5', 'raw_pulse')
     compressor_file_path = os.path.join(project_root, 'data', 'compressor', 'txt', 'EC1CP5.txt')
     
     print('=' * 70)
@@ -393,11 +528,12 @@ if __name__ == '__main__':
     try:
         # 绘制
         plot_countrate_and_temperature(
-            bin_file_path=bin_file_path,
+            bin_dir=bin_dir,
             compressor_file_path=compressor_file_path,
+            hdf5_dir=hdf5_dir,  # 优先从HDF5文件读取
             time_bin_size='1h',  # 1小时一个bin
-            start_date='2025-06-08',
-            end_date='2025-06-08',
+            start_date='2025-05-28',
+            end_date='2025-06-10',
             show_plot=True
         )
         
