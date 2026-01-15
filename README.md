@@ -34,31 +34,63 @@ DeepVibration/
 │   │   ├── preprocessor.py     # 数据预处理：bin转HDF5
 │   │   ├── coincident/         # 符合事件分析
 │   │   │   ├── process/        # 信号处理（FFT、小波、Hilbert、Lomb-Scargle）
+│   │   │   │   ├── fft.py      # FFT频谱分析
+│   │   │   │   ├── hilbert.py  # Hilbert变换分析
+│   │   │   │   ├── lomb.py     # Lomb-Scargle周期图分析
+│   │   │   │   └── wavelet.py  # 小波变换分析
 │   │   │   └── randomtrigger&inhibit.py  # RT和Inhibit符合事件分析
 │   │   ├── compressor/         # 制冷机数据分析
 │   │   │   └── select.py       # 制冷机数据读取和筛选
+│   │   ├── ge-self/            # HPGe探测器自身信号分析（物理事件）
+│   │   │   ├── select.py       # 物理事件筛选（既非RT也非Inhibit）
+│   │   │   ├── wavelet.py      # 物理事件小波分析（100kHz-25MHz）
+│   │   │   └── cut/            # 物理事件筛选条件
+│   │   │       ├── gmmpncut.py      # GMM pn cut（高斯混合模型筛选）
+│   │   │       ├── gmmwavelet.py    # GMM小波分析（对两类GMM事件分别做小波变换）
+│   │   │       ├── lsmpncut.py      # LSM pn cut（最小二乘法筛选）
+│   │   │       ├── mincut.py        # 最小值筛选
+│   │   │       ├── overthreshold.py # 过阈值筛选
+│   │   │       ├── pedcut.py        # 基线（pedestal）筛选
+│   │   │       ├── pncut.py         # pn cut（正负脉冲筛选）
+│   │   │       └── physical/        # 物理事件筛选
+│   │   │           └── select.py   # 物理事件筛选
 │   │   ├── inhibit/            # Inhibit信号分析
 │   │   │   └── select.py       # Inhibit信号筛选
-│   │   ├── physical/           # 物理事件分析
-│   │   │   ├── select.py       # 物理事件筛选（既非RT也非Inhibit）
-│   │   │   ├── cut/            # 物理事件筛选条件
-│   │   │   │   └── overthreshold.py  # 过滤过阈值事件
-│   │   │   └── wavelet.py      # 物理事件小波分析
 │   │   ├── randomtrigger/      # 随机触发分析
-│   │   │   └── distribution.py # RT信号分布分析
+│   │   │   ├── distribution.py # RT信号分布分析
+│   │   │   └── select.py       # RT信号筛选
 │   │   ├── sensor/             # 传感器数据分析
 │   │   │   └── vibration/      # 振动传感器数据
-│   │   │       ├── preprocess.py  # 振动数据预处理（TXT转HDF5）
-│   │   │       └── temperature/   # 振动传感器温度
-│   │   │           └── select.py  # 温度数据读取和筛选
+│   │   │       ├── preprocess.py              # 振动数据预处理（TXT转HDF5）
+│   │   │       ├── accelerate/                # 加速度分析
+│   │   │       │   └── select.py              # 加速度数据读取和筛选
+│   │   │       ├── displacement/              # 位移分析
+│   │   │       │   └── select.py              # 位移数据读取和筛选
+│   │   │       ├── frequency/                  # 频率分析
+│   │   │       │   ├── select.py               # 频率数据读取和筛选
+│   │   │       │   ├── correlationship.py     # 频率相关性分析
+│   │   │       │   └── distribution.py         # 频率分布分析
+│   │   │       ├── temperature/               # 振动传感器温度
+│   │   │       │   ├── select.py               # 温度数据读取和筛选
+│   │   │       │   └── animation.py            # 温度动画
+│   │   │       ├── temperature&displacement/   # 温度和位移联合分析
+│   │   │       │   └── temperature&sensor2.py  # 温度和传感器2位移联合分析
+│   │   │       └── velocity/                   # 速度分析
+│   │   │           └── select.py                # 速度数据读取和筛选
 │   │   ├── temperature/        # 温度数据联合分析
 │   │   │   ├── unite.py        # 振动传感器和制冷机温度联合绘制
 │   │   │   ├── power/          # 温度和功率联合分析
 │   │   │   │   └── unite.py    # 振动传感器温度、制冷机温度和功率联合绘制
 │   │   │   └── countrate/      # 计数率和温度联合分析
-│   │   │       └── unite.py    # bin文件事件计数率和制冷机温度联合绘制
+│   │   │       ├── unite.py     # bin文件事件计数率和制冷机温度联合绘制
+│   │   │       ├── inhibit/     # Inhibit计数率和温度
+│   │   │       │   └── unite.py
+│   │   │       ├── physics/     # 物理事件计数率和温度
+│   │   │       │   └── unite.py
+│   │   │       └── randomtrigger/  # RT计数率和温度
+│   │   │           └── unite.py
 │   │   └── wavelet/            # 小波分析工具
-│   │       └── wavelet.py      # 通用小波分析
+│   │       └── wavelet.py      # 通用小波分析（对所有event的CH0信号拼接后分析）
 │   └── utils/                  # 工具模块
 │       ├── save.py             # HDF5数据保存工具
 │       ├── visualize.py        # 数据可视化工具
@@ -79,7 +111,8 @@ DeepVibration/
 │   └── vibration/              # 振动传感器数据
 │       ├── txt/                # 振动传感器原始文本数据
 │       └── hdf5/               # 振动传感器处理后的HDF5数据
-└── design/                     # 设计文档
+└── docs/                       # 文档目录
+    └── (相关PDF文档)
 ```
 
 ## 功能模块
@@ -157,11 +190,22 @@ python python/utils/visualize.py
 
 ### 2.1 信号分析模块 (Python)
 
-#### `python/data/physical/`
+#### `python/data/ge-self/`
 
-**物理事件筛选** (`select.py`): 筛选既非RT也非Inhibit的物理事件
+**HPGe探测器自身信号分析**（物理事件，既非RT也非Inhibit）
 
-**过阈值过滤** (`cut/overthreshold.py`): 在物理事件基础上，过滤掉过阈值的事件（max(CH0) > 16382）
+- **物理事件筛选** (`select.py`): 筛选既非RT也非Inhibit的物理事件
+- **小波分析** (`wavelet.py`): 对物理事件的CH0信号进行小波时频分析（频率范围：100kHz-25MHz）
+
+**物理事件筛选条件** (`cut/`):
+- **GMM pn cut** (`gmmpncut.py`): 使用高斯混合模型（GMM）对CH1和CH2的最大值分布进行2成分拟合，自动识别两类事件区域，并展示示例波形
+- **GMM小波分析** (`gmmwavelet.py`): 对GMM识别出的两类事件分别进行小波变换，统计对比两类事件的功率谱差异（使用增量统计模式避免OOM）
+- **LSM pn cut** (`lsmpncut.py`): 使用最小二乘法拟合CH1和CH2最大值的关系，筛选在直线±1σ带内的事件
+- **最小值筛选** (`mincut.py`): 基于CH0最小值的筛选
+- **过阈值筛选** (`overthreshold.py`): 过滤过阈值事件（max(CH0) > 16382）
+- **基线筛选** (`pedcut.py`): 基于基线（pedestal）的筛选
+- **pn cut** (`pncut.py`): 正负脉冲筛选
+- **物理事件筛选** (`physical/select.py`): 物理事件筛选
 
 #### `python/data/inhibit/`
 
@@ -169,7 +213,9 @@ python python/utils/visualize.py
 
 #### `python/data/randomtrigger/`
 
-**RT信号分析** (`distribution.py`): 分析随机触发信号的分布
+**RT信号分析**:
+- `distribution.py`: 分析随机触发信号的分布
+- `select.py`: RT信号筛选
 
 #### `python/data/coincident/`
 
@@ -187,7 +233,21 @@ python python/utils/visualize.py
 
 **振动数据预处理** (`preprocess.py`): 将振动传感器TXT数据转换为HDF5格式
 
-**温度数据读取** (`temperature/select.py`): 读取和筛选振动传感器温度数据
+**振动信号分析**:
+- **加速度分析** (`accelerate/select.py`): 加速度数据读取和筛选
+- **位移分析** (`displacement/select.py`): 位移数据读取和筛选
+- **频率分析** (`frequency/`):
+  - `select.py`: 频率数据读取和筛选
+  - `correlationship.py`: 频率相关性分析
+  - `distribution.py`: 频率分布分析
+- **速度分析** (`velocity/select.py`): 速度数据读取和筛选
+
+**温度数据** (`temperature/`):
+- `select.py`: 温度数据读取和筛选
+- `animation.py`: 温度动画
+
+**联合分析** (`temperature&displacement/`):
+- `temperature&sensor2.py`: 温度和传感器2位移联合分析
 
 ### 2.3 温度数据联合分析 (Python)
 
@@ -197,7 +257,11 @@ python python/utils/visualize.py
 
 **温度和功率联合绘制** (`power/unite.py`): 绘制振动传感器温度、制冷机温度（多列）和功率
 
-**计数率和温度联合绘制** (`countrate/unite.py`): 绘制bin文件事件计数率和制冷机Controller温度
+**计数率和温度联合分析** (`countrate/`):
+- `unite.py`: 绘制bin文件事件计数率和制冷机Controller温度
+- `inhibit/unite.py`: Inhibit计数率和温度联合分析
+- `physics/unite.py`: 物理事件计数率和温度联合分析
+- `randomtrigger/unite.py`: RT计数率和温度联合分析
 
 ### 2.4 工具模块 (Python)
 
@@ -319,9 +383,12 @@ const unsigned int THRESHOLD_AC = 1450;    // 触发阈值
    - 使用 Python `utils/time.py` 查看bin文件的时间跨度
 
 4. **信号分析**: 
-   - 使用 Python `physical/select.py` 筛选物理事件
+   - 使用 Python `ge-self/select.py` 筛选物理事件
+   - 使用 Python `ge-self/wavelet.py` 对物理事件进行小波分析（100kHz-25MHz）
+   - 使用 Python `ge-self/cut/` 模块进行各种筛选（GMM、LSM、pn cut等）
+   - 使用 Python `ge-self/cut/gmmwavelet.py` 对GMM两类事件分别进行小波统计分析
    - 使用 Python `inhibit/select.py` 分析Inhibit信号
-   - 使用 Python `randomtrigger/distribution.py` 分析RT信号
+   - 使用 Python `randomtrigger/` 模块分析RT信号
    - 使用 Python `coincident/` 模块分析符合事件
 
 5. **联合分析**: 
@@ -360,7 +427,9 @@ const unsigned int THRESHOLD_AC = 1450;    // 触发阈值
 - matplotlib
 - pandas
 - scipy (用于信号处理)
-- pywt (用于小波变换，可选)
+- pywt (用于小波变换)
+- scikit-learn (用于GMM拟合，gmmpncut和gmmwavelet模块需要)
+- joblib (用于并行计算)
 
 ### C++
 - ROOT 框架（推荐最新版本）
@@ -380,7 +449,7 @@ cd DeepVibration
 
 2. **安装 Python 依赖**
 ```bash
-pip install numpy h5py matplotlib
+pip install numpy h5py matplotlib pandas scipy pywt scikit-learn joblib
 ```
 
 3. **配置 ROOT 环境**（如使用 C++ 程序）
@@ -419,6 +488,21 @@ show_h5_structure(ch5_file)
 
 # 可视化波形
 visualize_waveform(ch5_file, event_idx=0, channel_idx=0, time_unit='us')
+```
+
+### 示例3: GMM筛选和小波分析
+```python
+# 运行GMM pn cut，识别两类事件区域
+python python/data/ge-self/cut/gmmpncut.py
+
+# 对GMM两类事件分别进行小波统计分析（100kHz-25MHz）
+python python/data/ge-self/cut/gmmwavelet.py
+```
+
+### 示例4: 物理事件小波分析
+```python
+# 对物理事件进行小波时频分析（100kHz-25MHz）
+python python/data/ge-self/wavelet.py
 ```
 
 ## 注意事项
