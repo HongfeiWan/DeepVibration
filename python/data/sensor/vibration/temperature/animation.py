@@ -512,7 +512,7 @@ if __name__ == '__main__':
             square_size=1100.0,
             grid_resolution=10,
             frame_interval=5000,  # 每隔50个数据点取一帧
-            fps=5,  # 帧率5fps
+            fps=50,  # 帧率5fps
             save_path=output_path,
             show_animation=False,
             downsample_frames=1

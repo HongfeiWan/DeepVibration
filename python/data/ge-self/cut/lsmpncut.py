@@ -278,8 +278,8 @@ if __name__ == "__main__":
                 label="±1σ band",
             )
 
-        ax.set_xlabel("CH0 Max (ADC counts)", fontsize=12)
-        ax.set_ylabel("CH1 Max (ADC counts)", fontsize=12)
+        ax.set_xlabel("CH0 Max (ADC counts)", fontsize=18)
+        ax.set_ylabel("CH1 Max (ADC counts)", fontsize=18)
         ax.set_title(
             "Two-step least-squares fit on CH0 Max vs CH1 Max\n"
             "View: x < 2000, y < 3000 (fit on 2000 < x < 14000)",
@@ -287,9 +287,9 @@ if __name__ == "__main__":
         )
 
         # 只显示 x < 2000, y < 3000 的局部区域
-        ax.set_xlim(1100, 1400)
-        ax.set_ylim(1000, 2500)
-        ax.legend(fontsize=9)
+        #ax.set_xlim(1100, 1400)
+        #ax.set_ylim(1000, 2500)
+        ax.legend(fontsize=18)
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
