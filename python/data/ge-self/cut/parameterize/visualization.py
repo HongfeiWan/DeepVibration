@@ -39,10 +39,19 @@ spec_over.loader.exec_module(overthreshold_module)
 
 select_physical_events_no_overthreshold = overthreshold_module.select_physical_events_no_overthreshold
 
+# -----------------------------------------------------------------------------
+# 导入中值滤波函数（utils.filter.median_filter）
+# -----------------------------------------------------------------------------
+python_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))  # .../python
+if python_dir not in sys.path:
+    sys.path.insert(0, python_dir)
+from utils.filter import median_filter
+
 
 def compute_pulse_parameters(
     waveform: np.ndarray,
     sampling_interval_ns: float = 4.0,
+    baseline_window_us: float = 2.0,
 ) -> Dict[str, Any]:
     """
     对单条 CH0 波形做参数化，返回 Ped, Pedt, Amax, Tmax, Ammin, Q 等。
@@ -50,11 +59,12 @@ def compute_pulse_parameters(
     参数:
         waveform: 波形数组，形状 (time_samples,)
         sampling_interval_ns: 采样间隔（ns），默认 4 ns
+        baseline_window_us: 前沿和后沿基线的时间窗口长度（微秒），默认 2.0 µs
 
     返回:
         字典，包含:
-            - ped: 前 2 µs 基线平均值
-            - pedt: 尾部 2 µs 基线平均值
+            - ped: 前 baseline_window_us µs 基线平均值
+            - pedt: 尾部 baseline_window_us µs 基线平均值
             - amax: 最大幅度
             - tmax_us: 达到最大幅度的时间 (µs)
             - idx_max: 最大幅度对应的采样点索引
@@ -66,12 +76,13 @@ def compute_pulse_parameters(
     wf = np.asarray(waveform, dtype=np.float64).ravel()
     n_samples = wf.shape[0]
 
-    # 2 µs 对应的采样点数: 2e-6 / (4e-9) = 500
-    samples_2us = int(round(2e-6 / (sampling_interval_ns * 1e-9)))
-    samples_2us = max(1, min(samples_2us, n_samples // 2))
+    # baseline_window_us µs 对应的采样点数
+    baseline_window_ns = baseline_window_us * 1000.0  # 转换为纳秒
+    samples_baseline = int(round(baseline_window_ns / sampling_interval_ns))
+    samples_baseline = max(1, min(samples_baseline, n_samples // 2))
 
-    ped = float(np.mean(wf[:samples_2us]))
-    pedt = float(np.mean(wf[-samples_2us:]))
+    ped = float(np.mean(wf[:samples_baseline]))
+    pedt = float(np.mean(wf[-samples_baseline:]))
 
     idx_max = int(np.argmax(wf))
     amax = float(wf[idx_max])
@@ -123,11 +134,12 @@ def visualize_single_pulse_parameters(
     ch0_idx: int = 0,
     ch5_idx: int = 0,
     event_rank: int = 0,
+    baseline_window_us: float = 2.0,
     save_path: Optional[str] = None,
     show_plot: bool = True,
 ) -> str:
     """
-    使用 select_physical_events_no_overthreshold 挑选一个“不过阈值”的 Physical 事件，
+    使用 select_physical_events_no_overthreshold 挑选一个"不过阈值"的 Physical 事件，
     对其 CH0 波形做参数化并可视化。
 
     参数:
@@ -137,7 +149,8 @@ def visualize_single_pulse_parameters(
         ch0_threshold: CH0 最大值阈值（不过阈值条件）
         ch0_idx: CH0 通道索引
         ch5_idx: CH5 通道索引
-        event_rank: 在筛选出的事件中的“第几个”（0 为第一个）
+        event_rank: 在筛选出的事件中的"第几个"（0 为第一个）
+        baseline_window_us: 前沿和后沿基线的时间窗口长度（微秒），默认 2.0 µs
         save_path: 保存图片路径，None 时自动生成
         show_plot: 是否调用 plt.show()
 
@@ -188,13 +201,18 @@ def visualize_single_pulse_parameters(
 
         waveform = ch0_channel_data[:, ch0_idx, event_index].astype(np.float64)
 
+    # 对波形先做一次中值滤波，再进行后续参数化操作
+    waveform = median_filter(waveform, kernel_size=3)
+
     # 时间轴：4 ns 采样，单位 µs
     sampling_interval_ns = 4.0
     time_axis_us = np.arange(waveform.shape[0]) * sampling_interval_ns / 1000.0
 
     # 3. 计算参数
     params = compute_pulse_parameters(
-        waveform, sampling_interval_ns=sampling_interval_ns
+        waveform, 
+        sampling_interval_ns=sampling_interval_ns,
+        baseline_window_us=baseline_window_us
     )
 
     ped = params["ped"]
@@ -205,13 +223,14 @@ def visualize_single_pulse_parameters(
     ammin = params["ammin"]
     q = params["q"]
 
-    # 2 µs 对应的采样点数，用于画 Ped/Pedt 区域
-    samples_2us = int(round(2e-6 / (sampling_interval_ns * 1e-9)))
-    samples_2us = max(1, min(samples_2us, waveform.shape[0] // 2))
+    # baseline_window_us µs 对应的采样点数，用于画 Ped/Pedt 区域
+    baseline_window_ns = baseline_window_us * 1000.0  # 转换为纳秒
+    samples_baseline = int(round(baseline_window_ns / sampling_interval_ns))
+    samples_baseline = max(1, min(samples_baseline, waveform.shape[0] // 2))
 
     t_ped_start = time_axis_us[0]
-    t_ped_end = time_axis_us[samples_2us - 1]
-    t_pedt_start = time_axis_us[-samples_2us]
+    t_ped_end = time_axis_us[samples_baseline - 1]
+    t_pedt_start = time_axis_us[-samples_baseline]
     t_pedt_end = time_axis_us[-1]
 
     # 统一 y 轴范围
