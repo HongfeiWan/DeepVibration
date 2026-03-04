@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-PN-cut 选中事件的 CH2 波形可视化脚本。
+PN-cut 选中事件的 CH3 波形可视化脚本。
 
 功能：
 - 使用 overthreshold.py 中的 select_physical_events_no_overthreshold 先筛出不过阈值的 Physical 事件；
@@ -21,6 +21,7 @@ import h5py
 import numpy as np
 import matplotlib.pyplot as plt
 import importlib.util
+from scipy.optimize import curve_fit
 
 
 # -----------------------------------------------------------------------------
@@ -154,22 +155,25 @@ def _select_events_in_1sigma_band(
 def _visualize_single_event_by_index(
     ch0_3_file: str,
     event_index: int,
-    channel_idx: int = 2,
+    channel_idx: int = 3,
     save_path: Optional[str] = None,
     show_plot: bool = True,
+    smooth_window: int = 5,
+    smooth_times: int = 20,
 ) -> str:
     """
-    使用事件索引（全局事件号）来可视化单个通道的波形（本脚本用于 CH2）。
+    使用事件索引（全局事件号）来可视化单个通道的波形（本脚本用于 CH3）。
 
     逻辑：
         - 不再做参数化标注与基线放大，只绘制 PN-cut 选中事件对应通道的波形。
-
     参数：
         ch0_3_file: CH0-3 文件路径
         event_index: 全局事件索引
-        channel_idx: 要展示的通道索引（本脚本默认 2，对应 CH2）
+        channel_idx: 要展示的通道索引（本脚本默认 3，对应 CH3）
         save_path: 保存图片路径，None 时自动生成
         show_plot: 是否调用 plt.show()
+        smooth_window: 滑动平均窗口宽度（必须为正奇数），默认 5
+        smooth_times: 反复平滑的次数，默认 5 次
 
     返回：
         实际保存的图片路径。
@@ -194,16 +198,30 @@ def _visualize_single_event_by_index(
 
         waveform = channel_data[:, channel_idx, event_index].astype(np.float64)
 
-    # 对波形先做一次中值滤波
-    waveform = median_filter(waveform, kernel_size=3)
+    waveform_smooth = waveform.copy()
+    # 可配置的滑动平均窗口，要求为正奇数；可以反复平滑 smooth_times 次
+    if smooth_window is not None and smooth_window > 1:
+        if smooth_window % 2 == 0:
+            raise ValueError(f"smooth_window 必须为奇数，当前为 {smooth_window}")
+        if smooth_times < 1:
+            smooth_times = 1
+        if waveform.size >= smooth_window:
+            half = smooth_window // 2
+            for _ in range(smooth_times):
+                tmp = waveform_smooth.copy()
+                for i in range(half, waveform.size - half):
+                    waveform_smooth[i] = float(
+                        np.mean(tmp[i - half : i + half + 1])
+                    )
+    # 两侧 half 个点保持原始 waveform 的值
 
     # 时间轴：4 ns 采样，单位 µs
     sampling_interval_ns = 4.0
     time_axis_us = np.arange(time_samples) * sampling_interval_ns / 1000.0
 
     # 统一 y 轴范围（两侧留一点 margin）
-    global_min = float(np.min(waveform))
-    global_max = float(np.max(waveform))
+    global_min = float(np.min(waveform_smooth))
+    global_max = float(np.max(waveform_smooth))
     data_range = global_max - global_min
     if data_range > 0:
         margin = data_range * 0.15
@@ -215,21 +233,112 @@ def _visualize_single_event_by_index(
         y_min = center - margin
         y_max = center + margin
 
-    # 画图：仅展示波形
+    # 使用 f(x) = 0.5 * p0 * tanh(p1 * (x - p2)) + p3 对快放信号前沿进行拟合
+    def _tanh_rise(x, p0, p1, p2, p3):
+        return 0.5 * p0 * np.tanh(p1 * (x - p2)) + p3
+
+    fit_curve = None
+    try:
+        # 估计前沿/后沿基线和幅度，限定拟合时间范围
+        baseline_window_us = 2.0
+        baseline_window_ns = baseline_window_us * 1000.0
+        samples_baseline = int(round(baseline_window_ns / sampling_interval_ns))
+        samples_baseline = max(1, min(samples_baseline, waveform_smooth.size // 2))
+
+        # 前沿基线：前 baseline_window_us 区域的平均
+        baseline_front = float(np.mean(waveform_smooth[:samples_baseline]))
+        # 后沿基线：最后 baseline_window_us 区域的平均（目前主要用于限定时间范围，可按需扩展）
+        baseline_back = float(np.mean(waveform_smooth[-samples_baseline:]))
+
+        amp = waveform_smooth - baseline_front
+        max_amp = float(np.max(amp))
+
+        if max_amp > 0:
+            # 最大点及其时间
+            idx_max = int(np.argmax(amp))
+            t_max = float(time_axis_us[idx_max])
+
+            # 5% ~ 95% 幅度区间
+            low = 0.05 * max_amp
+            high = 0.95 * max_amp
+
+            # 基于幅度的选择：只取 5%~95% 区间的点
+            mask_amp = (amp >= low) & (amp <= high)
+
+            # 基于时间的选择：限定在前沿基线窗口末端与后沿基线窗口起点之间，
+            # 且只取 Tmax 之前的点
+            t_front_end = time_axis_us[samples_baseline - 1]
+            t_back_start = time_axis_us[-samples_baseline]
+            mask_time = (time_axis_us >= t_front_end) & (time_axis_us <= t_back_start)
+            mask_before_max = time_axis_us <= t_max
+
+            mask = mask_amp & mask_time & mask_before_max
+            if np.count_nonzero(mask) >= 5:
+                x_data = time_axis_us[mask]
+                y_data = waveform_smooth[mask]
+
+                p0_init = 2.0 * max_amp  # 高平台 ~ baseline + max_amp
+                p3_init = baseline_front
+
+                mid_level = 0.5 * max_amp
+                idx_mid = int(np.argmax(amp >= mid_level))
+                if amp[idx_mid] >= mid_level:
+                    p2_init = float(time_axis_us[idx_mid])
+                else:
+                    p2_init = float(np.mean(x_data))
+
+                # 利用 5%–95% 上升时间约束 p1：ln(19) / p1 ≈ 上升时间(5%→95%)
+                level_5 = 0.05 * max_amp
+                level_95 = 0.95 * max_amp
+                idx_5 = np.argmax(amp >= level_5)
+                idx_95 = np.argmax(amp >= level_95)
+                if amp[idx_5] >= level_5 and amp[idx_95] >= level_95 and idx_95 > idx_5:
+                    rise_time = float(time_axis_us[idx_95] - time_axis_us[idx_5])
+                    rise_time = max(rise_time, 1e-6)
+                    p1_init = np.log(19.0) / rise_time
+                else:
+                    # 退化情况退回到原来的宽度估计
+                    p1_init = 1.0 / (x_data[-1] - x_data[0] + 1e-6)
+
+                popt, _ = curve_fit(
+                    _tanh_rise,
+                    x_data,
+                    y_data,
+                    p0=[p0_init, p1_init, p2_init, p3_init],
+                    maxfev=10000,
+                )
+                fit_curve = _tanh_rise(time_axis_us, *popt)
+                p0, p1, p2, p3 = float(popt[0]), float(popt[1]), float(popt[2]), float(popt[3])
+                print(f"tanh fit: p0={p0:.6f}, p1={p1:.6f}, p2={p2:.6f}, p3={p3:.6f}")
+    except Exception:
+        fit_curve = None
+
+    # 仅画单个波形图，并叠加拟合曲线
     plt.rcParams.update(
         {
             "font.family": "serif",
             "font.serif": ["Times New Roman"],
         }
     )
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(1, 1, figsize=(6, 5))
 
     ax.plot(
         time_axis_us,
-        waveform,
-        color="C2",
+        waveform_smooth,
+        color="blue",
         linewidth=1,
+        label="Waveform (smoothed)",
     )
+
+    if fit_curve is not None:
+        ax.plot(
+            time_axis_us,
+            fit_curve,
+            color="red",
+            linewidth=3,
+            linestyle="--",
+            label="tanh fit",
+        )
 
     ax.set_xlabel("Time (µs)", fontsize=18, fontweight="bold")
     ax.set_ylabel("Amplitude (ADC)", fontsize=18, fontweight="bold")
@@ -242,13 +351,13 @@ def _visualize_single_event_by_index(
 
     filename = os.path.basename(ch0_3_file)
     ax.set_title(
-        f"CH2 Waveform after PN-cut\n"
+        f"CH3 Waveform after PN-cut\n"
         f"{filename}  |  Event #{event_index}",
         fontsize=13,
         fontweight="bold",
     )
 
-    plt.tight_layout()
+    fig.tight_layout()
 
     # 保存图片
     if save_path is None:
@@ -262,7 +371,7 @@ def _visualize_single_event_by_index(
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename_png = (
-            f"ch2_pncut_waveform_event{event_index}_{timestamp}.png"
+            f"ch3_pncut_waveform_event{event_index}_{timestamp}.png"
         )
         save_path = os.path.join(output_dir, filename_png)
 
@@ -288,12 +397,12 @@ def visualize_pncut_waveforms(
     x_max: float = 14000.0,
     sigma_factor: float = 1.0,
     baseline_window_us: float = 2.0,
-    display_channel_idx: int = 2,
+    display_channel_idx: int = 3,
     max_events_to_plot: int = 8,
     show_plot: bool = True,
 ) -> List[str]:
     """
-    对符合 lsmpncut PN-cut ±1σ 带的事件，仅可视化指定通道（本脚本为 CH2）波形。
+    对符合 lsmpncut PN-cut ±1σ 带的事件，仅可视化指定通道（本脚本为 CH3）波形。
 
     参数：
         ch0_idx, ch1_idx: 通道索引，用于计算 max_ch0 和 max_ch1 进行 PN-cut
@@ -318,7 +427,7 @@ def visualize_pncut_waveforms(
 
     # 只取前 max_events_to_plot 个事件做可视化
     n_plot = min(max_events_to_plot, event_ranks.size)
-    print(f"\n将对前 {n_plot} 个事件进行 CH2 波形可视化。")
+    print(f"\n将对前 {n_plot} 个事件进行 CH3 波形可视化。")
 
     saved_paths: List[str] = []
     for i in range(n_plot):
@@ -352,7 +461,7 @@ if __name__ == "__main__":
             x_max=14000.0,
             sigma_factor=1.0,
             baseline_window_us=2.0,  # 该参数在本脚本中已不影响可视化，仅保留接口
-            display_channel_idx=2,
+            display_channel_idx=3,
             max_events_to_plot=2100,
             show_plot=True,
         )

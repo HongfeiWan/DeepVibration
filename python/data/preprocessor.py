@@ -25,6 +25,7 @@ project_root = os.path.dirname(os.path.dirname(current_dir))
 read_path = os.path.join(project_root, 'data', 'bin')
 amp_save_path = os.path.join(project_root, 'data', 'hdf5', 'raw_pulse', 'CH0-3')
 trigger_save_path = os.path.join(project_root, 'data', 'hdf5', 'raw_pulse', 'CH5')
+NAI_save_path=os.path.join(project_root, 'data', 'hdf5', 'raw_pulse', 'CH4')
 filename_input = '20250520_CEvNS_DZL_sm_pre10000_tri10mV_SA6us0.8x50_SA12us0.8x50_TAout10us1.2x100_TAout10us0.5x3_RT50mHz_NaISA1us1.0x20_plasticsci1-10_bkg'
 
 RUN_Start_NUMBER = 1    # 起始运行编号
@@ -33,6 +34,7 @@ RUN_End_NUMBER = 511    # 结束运行编号
 # 定义通道数和事件数
 AMP_CHANNEL_LIST = [0, 1, 2, 3]     # 指定要保存的通道索引（0=CH0, 1=CH1, 2=CH2, 3=CH3）
 TRIGGER_CHANNEL_LIST = [5]          # 指定要保存的随机触发通道索引（5=CH5）
+NAI_CHANNEL_LIST = [4]              # 指定要保存的NAI通道索引（4=CH4）
 EVENT_NUMBER = 10000    # 每个bin文件中的理论上事件数
 MAX_WINDOWS = 30000     # 时间窗 120μs （30000个时间点 x 4ns）
 
@@ -278,9 +280,28 @@ def main():
     tasks = []
     for i in range(RUN_Start_NUMBER, RUN_End_NUMBER + 1):
         run_filename = os.path.join(read_path, f'{filename_input}FADC_RAW_Data_{i}.bin')
-        # 为每个文件添加两个任务：AMP通道和TRIGGER通道
-        tasks.append((run_filename, AMP_CHANNEL_LIST, EVENT_NUMBER, amp_save_path))
-        tasks.append((run_filename, TRIGGER_CHANNEL_LIST, EVENT_NUMBER, trigger_save_path))
+        filename = os.path.basename(run_filename)
+        base_name = os.path.splitext(filename)[0]
+
+        # 为每个文件添加任务：AMP通道、TRIGGER通道和NAI通道
+        # 如果对应的h5文件已经存在，则跳过该任务
+        amp_output_file = os.path.join(amp_save_path, f'{base_name}_processed.h5')
+        if not os.path.exists(amp_output_file):
+            tasks.append((run_filename, AMP_CHANNEL_LIST, EVENT_NUMBER, amp_save_path))
+        else:
+            print(f'跳过 {run_filename} (通道: {AMP_CHANNEL_LIST})，已存在: {amp_output_file}')
+
+        trigger_output_file = os.path.join(trigger_save_path, f'{base_name}_processed.h5')
+        if not os.path.exists(trigger_output_file):
+            tasks.append((run_filename, TRIGGER_CHANNEL_LIST, EVENT_NUMBER, trigger_save_path))
+        else:
+            print(f'跳过 {run_filename} (通道: {TRIGGER_CHANNEL_LIST})，已存在: {trigger_output_file}')
+
+        nai_output_file = os.path.join(NAI_save_path, f'{base_name}_processed.h5')
+        if not os.path.exists(nai_output_file):
+            tasks.append((run_filename, NAI_CHANNEL_LIST, EVENT_NUMBER, NAI_save_path))
+        else:
+            print(f'跳过 {run_filename} (通道: {NAI_CHANNEL_LIST})，已存在: {nai_output_file}')
     # 获取可用CPU核心数，最多使用所有核心
     max_workers = os.cpu_count()
     print(f'使用 {max_workers} 个CPU核心进行并行处理')
