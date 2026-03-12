@@ -24,7 +24,7 @@ if python_dir not in sys.path:
 from utils.visualize import get_h5_files
 
 # 导入 select.py 模块
-select_py_path = os.path.join(parent_dir, 'select.py')
+select_py_path = os.path.join(parent_dir, 'selected.py')
 spec = importlib.util.spec_from_file_location("physical_select", select_py_path)
 physical_select = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(physical_select)

@@ -142,15 +142,20 @@ def plot_pncut_scatter_multi(
     rt_x, rt_y = [], []
     inhibit_x, inhibit_y = [], []
     geself_x, geself_y = [], []
+    acv_x, acv_y = [], []
     total_events = 0
 
-    # 与 ge-self / RT / Inhibit 脚本保持一致的 RT 阈值
+    # RT 阈值 (CH5) 与 NaI 触发阈值 (CH4)
     rt_cut = 6000.0
+    nai_trigger_threshold = 7060.0
+    t_ge_us = 40.0
+    sampling_interval_ns = 4.0
 
-    # 写死 CH5 目录：相对当前脚本向上四级即项目根，再拼接 data/hdf5/raw_pulse/CH5
+    # 写死 CH5 / CH4 目录：相对当前脚本向上四级即项目根，再拼接 data/hdf5/raw_pulse/CH5 / CH4
     script_dir = os.path.dirname(os.path.abspath(__file__))
     project_root = os.path.abspath(os.path.join(script_dir, "..", "..", "..", ".."))
     ch5_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH5")
+    ch4_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH4")
 
     for h5_path in h5_paths:
         if not os.path.isfile(h5_path):
@@ -220,10 +225,52 @@ def plot_pncut_scatter_multi(
                 print(f"[警告] 未找到对应的 CH5 文件，跳过 RT 判据: {ch5_path}")
                 ch5_max_values = np.zeros(num_events, dtype=np.float64)
 
+            # 尝试找到对应的 CH4 文件并计算 NaI 触发信息（用于 ACV 判据）
+            ch4_path = os.path.join(ch4_dir, os.path.basename(h5_path))
+            if os.path.isfile(ch4_path):
+                with h5py.File(ch4_path, "r") as f_ch4:
+                    if "channel_data" not in f_ch4:
+                        print(f"[警告] CH4 文件中未找到 'channel_data'，跳过 ACV 判据: {ch4_path}")
+                        nai_max_values = np.zeros(num_events, dtype=np.float64)
+                        delta_t_us = np.full(num_events, np.nan, dtype=np.float64)
+                    else:
+                        ch4_channel_data = f_ch4["channel_data"]
+                        if ch4_channel_data.ndim != 3:
+                            print(
+                                f"[警告] CH4 'channel_data' 维度应为 3，当前为 {ch4_channel_data.ndim}，跳过 ACV 判据: {ch4_path}"
+                            )
+                            nai_max_values = np.zeros(num_events, dtype=np.float64)
+                            delta_t_us = np.full(num_events, np.nan, dtype=np.float64)
+                        else:
+                            _, _, n_evt4 = ch4_channel_data.shape
+                            if n_evt4 != num_events:
+                                print(
+                                    f"[警告] CH4 事件数 ({n_evt4}) 与 CH0-3 ({num_events}) 不一致，跳过 ACV 判据: {ch4_path}"
+                                )
+                                nai_max_values = np.zeros(num_events, dtype=np.float64)
+                                delta_t_us = np.full(num_events, np.nan, dtype=np.float64)
+                            else:
+                                nai_waveforms = ch4_channel_data[:, 0, :].astype(np.float64)
+                                nai_max_values = nai_waveforms.max(axis=0)
+                                nai_max_indices = nai_waveforms.argmax(axis=0)
+                                t_nai_us = nai_max_indices.astype(np.float64) * sampling_interval_ns * 1e-3
+                                delta_t_us = t_ge_us - t_nai_us
+            else:
+                print(f"[警告] 未找到对应的 CH4 文件，跳过 ACV 判据: {ch4_path}")
+                nai_max_values = np.zeros(num_events, dtype=np.float64)
+                delta_t_us = np.full(num_events, np.nan, dtype=np.float64)
+
             # 根据条件分类
             rt_mask = ch5_max_values > rt_cut
             inhibit_mask = ch0_min_values == 0
             geself_mask = (~rt_mask) & (~inhibit_mask)
+            acv_mask = (
+                geself_mask
+                & (nai_max_values >= nai_trigger_threshold)
+                & (delta_t_us >= 1.0)
+                & (delta_t_us <= 16.0)
+            )
+            geself_mask = geself_mask & (~acv_mask)
 
             # 各类事件的坐标
             rt_x.append(max_ch0[rt_mask])
@@ -232,11 +279,14 @@ def plot_pncut_scatter_multi(
             inhibit_y.append(max_ch1[inhibit_mask])
             geself_x.append(max_ch0[geself_mask])
             geself_y.append(max_ch1[geself_mask])
+            acv_x.append(max_ch0[acv_mask])
+            acv_y.append(max_ch1[acv_mask])
 
             total_events += num_events
             print(
                 f"读取文件: {h5_path} | 事件数: {num_events}，"
-                f"RT: {rt_mask.sum()}，Inhibit: {inhibit_mask.sum()}，ge-self: {geself_mask.sum()}"
+                f"RT: {rt_mask.sum()}，Inhibit: {inhibit_mask.sum()}，"
+                f"ge-self: {geself_mask.sum()}，ACV: {acv_mask.sum()}"
             )
 
     if total_events == 0:
@@ -252,6 +302,8 @@ def plot_pncut_scatter_multi(
     inh_y_all = _concat(inhibit_y)
     ges_x_all = _concat(geself_x)
     ges_y_all = _concat(geself_y)
+    acv_x_all = _concat(acv_x)
+    acv_y_all = _concat(acv_y)
 
     # 画散点（按类别着色）
     plt.rcParams.update(
@@ -265,18 +317,21 @@ def plot_pncut_scatter_multi(
 
     # RT：蓝色
     if rt_x_all.size > 0:
-        ax.scatter(rt_x_all, rt_y_all, s=2, alpha=0.6, c="tab:blue", edgecolors="none", label="RT")
+        ax.scatter(rt_x_all, rt_y_all, s=2, alpha=0.6, c="blue", edgecolors="none", label="RT")
     # Inhibit：黑色
     if inh_x_all.size > 0:
         ax.scatter(inh_x_all, inh_y_all, s=2, alpha=0.6, c="black", edgecolors="none", label="Inhibit")
     # ge-self：红色
     if ges_x_all.size > 0:
-        ax.scatter(ges_x_all, ges_y_all, s=2, alpha=0.6, c="tab:red", edgecolors="none", label="ge-self")
+        ax.scatter(ges_x_all, ges_y_all, s=2, alpha=0.6, c="red", edgecolors="none", label="ge-self")
+    # ACV：绿色
+    if acv_x_all.size > 0:
+        ax.scatter(acv_x_all, acv_y_all, s=3, alpha=0.7, c="green", edgecolors="none", label="ACV")
 
     ax.set_xlabel("max CH0 (ADC)", fontsize=14, fontweight="bold")
     ax.set_ylabel("max CH1 (ADC)", fontsize=14, fontweight="bold")
     ax.set_title(
-        "PN-cut Scatter: max CH0 vs max CH1\n(RT / Inhibit / ge-self)",
+        "PN-cut Scatter: max CH0 vs max CH1\n(RT / Inhibit / ge-self / ACV)",
         fontsize=11,
         fontweight="bold",
     )
@@ -291,6 +346,7 @@ def plot_pncut_scatter_multi(
         rt_x_all.size > 0,
         inh_x_all.size > 0,
         ges_x_all.size > 0,
+        acv_x_all.size > 0,
     ]):
         # 图例中点的大小调大一些（markerscale > 1）
         ax.legend(loc="best", fontsize=9, markerscale=3)
