@@ -36,6 +36,8 @@ ch0parameters_save_path = os.path.join(project_root, 'data', 'hdf5', 'raw_pulse'
 ch1parameters_save_path = os.path.join(project_root, 'data', 'hdf5', 'raw_pulse', 'CH1_parameters')
 ch2parameters_save_path = os.path.join(project_root, 'data', 'hdf5', 'raw_pulse', 'CH2_parameters')
 ch3parameters_save_path = os.path.join(project_root, 'data', 'hdf5', 'raw_pulse', 'CH3_parameters')
+ch4parameters_save_path = os.path.join(project_root, 'data', 'hdf5', 'raw_pulse', 'CH4_parameters')
+ch5parameters_save_path = os.path.join(project_root, 'data', 'hdf5', 'raw_pulse', 'CH5_parameters')
 
 filename_input = '20250520_CEvNS_DZL_sm_pre10000_tri10mV_SA6us0.8x50_SA12us0.8x50_TAout10us1.2x100_TAout10us0.5x3_RT50mHz_NaISA1us1.0x20_plasticsci1-10_bkg'
 
@@ -529,6 +531,44 @@ def bin2rawpulse(run_filename, channel_list, event_number, save_path, ch0paramet
                         'and high-frequency energy ratio (>0.2 MHz).'
                     )
                 print(f'CH3_parameters 已写入 {os.path.basename(ch3_file)}')
+
+        # CH4：仅保存每个事件的最大值
+        if 4 in channel_list:
+            ch4_idx = channel_list.index(4)
+            ch4_file = os.path.join(ch4parameters_save_path, os.path.basename(output_file))
+            if not os.path.exists(ch4_file):
+                os.makedirs(ch4parameters_save_path, exist_ok=True)
+                ch4_wave = channel_data[:, ch4_idx, :]  # (n_samples, n_events)
+                ch4_wave_f32 = np.asarray(ch4_wave, dtype=np.float32)
+                max_ch4 = ch4_wave_f32.max(axis=0)
+
+                with h5py.File(ch4_file, 'w') as f_ch4:
+                    f_ch4.create_dataset('max_ch4', data=max_ch4)
+                    f_ch4.attrs['source_file'] = str(os.path.abspath(output_file))
+                    f_ch4.attrs['channel_index'] = int(ch4_idx)
+                    f_ch4.attrs['description'] = (
+                        'Per-event CH4 feature: maximum value only.'
+                    )
+                print(f'CH4_parameters 已写入 {os.path.basename(ch4_file)}')
+
+        # CH5：仅保存每个事件的最大值
+        if 5 in channel_list:
+            ch5_idx = channel_list.index(5)
+            ch5_file = os.path.join(ch5parameters_save_path, os.path.basename(output_file))
+            if not os.path.exists(ch5_file):
+                os.makedirs(ch5parameters_save_path, exist_ok=True)
+                ch5_wave = channel_data[:, ch5_idx, :]  # (n_samples, n_events)
+                ch5_wave_f32 = np.asarray(ch5_wave, dtype=np.float32)
+                max_ch5 = ch5_wave_f32.max(axis=0)
+
+                with h5py.File(ch5_file, 'w') as f_ch5:
+                    f_ch5.create_dataset('max_ch5', data=max_ch5)
+                    f_ch5.attrs['source_file'] = str(os.path.abspath(output_file))
+                    f_ch5.attrs['channel_index'] = int(ch5_idx)
+                    f_ch5.attrs['description'] = (
+                        'Per-event CH5 feature: maximum value only.'
+                    )
+                print(f'CH5_parameters 已写入 {os.path.basename(ch5_file)}')
         
         print(f'保存完成，耗时: {time.time() - start_time:.2f}秒')
         #print(f'输出文件路径: {os.path.abspath(output_file)}')
