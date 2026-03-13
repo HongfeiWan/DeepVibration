@@ -123,50 +123,6 @@ def _compute_fft(
     return freq, amp
 
 
-def _compute_non_dc_energy_ratio(waveform: np.ndarray) -> float:
-    """
-    计算波形的非直流能量占比：E_nonDC / E_total。
-
-    使用时间域等效公式：
-        E_total = sum(x^2)
-        E_DC    = N * mean(x)^2
-        ratio   = (E_total - E_DC) / E_total
-    """
-    x = waveform.astype(np.float64)
-    n = x.size
-    if n == 0:
-        return 0.0
-
-    total_energy = float(np.sum(x * x))
-    if total_energy <= 0.0:
-        return 0.0
-
-    mean_val = float(np.mean(x))
-    dc_energy = n * (mean_val ** 2)
-    non_dc_energy = max(total_energy - dc_energy, 0.0)
-
-    return non_dc_energy / total_energy
-
-
-def _compute_second_diff_peak_to_mean(waveform: np.ndarray) -> float:
-    """
-    计算二阶差分的“峰均比”：
-        d2 = diff(diff(waveform))
-        使用绝对值后的最大值 / 平均值。
-    """
-    x = waveform.astype(np.float64)
-    if x.size < 3:
-        return 0.0
-    d1 = np.diff(x)
-    d2 = np.diff(d1)
-    d2_abs = np.abs(d2)
-    mean_val = float(np.mean(d2_abs))
-    if mean_val <= 0.0:
-        return 0.0
-    peak_val = float(np.max(d2_abs))
-    return peak_val / mean_val
-
-
 def _compute_high_freq_energy_ratio(
     waveform: np.ndarray,
     sampling_interval_ns: float = 4.0,
@@ -250,24 +206,33 @@ def analyze_fft_for_events(
     for ev in event_indices:
         wf = _get_ch3_waveform(ch0_3_file_resolved, ev, channel_idx=channel_idx)
         waveforms[ev] = wf
-        ratio = _compute_non_dc_energy_ratio(wf)
-        peak_mean_ratio = _compute_second_diff_peak_to_mean(wf)
         high_freq_ratio = _compute_high_freq_energy_ratio(
             wf, sampling_interval_ns=sampling_interval_ns, cutoff_mhz=0.2
         )
         print(
             f"Event #{ev}: 采样点数 = {wf.size}, "
             f"最小值 = {wf.min():.1f}, 最大值 = {wf.max():.1f}, "
-            f"非直流能量占比 = {ratio * 100:.3f}%, "
-            f"二阶差分峰均比 = {peak_mean_ratio:.3f}, "
             f"freq > 0.2 MHz 能量占比 = {high_freq_ratio * 100:.3f}%"
         )
 
-    # 计算 FFT（基于 CH3）
+    # 计算 FFT（基于 CH3），并统计能量谱分布方差
     fft_results = {}
+    power_distributions = {}
     for ev, wf in waveforms.items():
         freq, amp = _compute_fft(wf, sampling_interval_ns=sampling_interval_ns)
         fft_results[ev] = (freq, amp)
+
+        power = amp.astype(np.float64) ** 2
+        if power.size > 0 and np.sum(power) > 0.0:
+            power_norm = power / np.sum(power)
+            var_power = float(np.var(power_norm))
+            power_distributions[ev] = (freq, power_norm)
+        else:
+            var_power = 0.0
+
+        print(
+            f"Event #{ev}: CH3 频域能量谱分布方差 = {var_power:.6e}"
+        )
 
     # 频率单位转为 MHz
     fig, axes = plt.subplots(4, 1, figsize=(10, 12))
@@ -340,17 +305,40 @@ def analyze_fft_for_events(
 
     fig.tight_layout()
 
+    # 新增图：CH3 频域能量谱分布（归一化功率）
+    if power_distributions:
+        fig_dist, ax_dist = plt.subplots(1, 1, figsize=(10, 4))
+        for ev, (freq_dist, power_norm_dist) in power_distributions.items():
+            freq_mhz_dist = freq_dist * 1e-6
+            if max_freq_mhz is not None:
+                mask = freq_mhz_dist <= max_freq_mhz
+                freq_mhz_dist = freq_mhz_dist[mask]
+                power_plot = power_norm_dist[mask]
+            else:
+                power_plot = power_norm_dist
+            ax_dist.plot(freq_mhz_dist, power_plot, label=f"Event #{ev}")
+
+        ax_dist.set_xlabel("Frequency (MHz)")
+        ax_dist.set_ylabel("Normalized Power")
+        ax_dist.set_title("CH3 频域能量谱分布（归一化功率）")
+        ax_dist.grid(True, alpha=0.3)
+        ax_dist.legend()
+
+        fig_dist.tight_layout()
+
     if show_plot:
         plt.show()
     else:
         plt.close(fig)
+        if power_distributions:
+            plt.close(fig_dist)
 
 
 if __name__ == "__main__":
     # 默认对 5187 号和 5353 号 CH3 事件做频域 FFT 对比
     analyze_fft_for_events(
         ch0_3_file=None,
-        event_indices=(7688, 5353),
+        event_indices=(136, 5353),
         channel_idx=3,
         sampling_interval_ns=4.0,
         max_freq_mhz=None,  # 如果只想看低频部分，可以改成例如 50.0
