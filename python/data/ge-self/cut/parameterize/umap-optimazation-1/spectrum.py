@@ -32,6 +32,7 @@ from typing import Dict, List, Sequence, Tuple
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.optimize import curve_fit
 
 
 def _load_event_mapping(path: Path) -> Tuple[List[str], np.ndarray, np.ndarray, np.ndarray]:
@@ -141,8 +142,8 @@ def _plot_histogram(max_values: np.ndarray, bins: int = 100, cluster: int = 0) -
         return
 
     # ADC -> 能量(keV) 线性变换: E = a * x + b
-    a = 0.00085201153345758
-    b = -0.9340399729479708
+    a = 0.0008432447500464594
+    b = -0.826976770117076
     energy_values = a * max_values + b
 
     plt.rcParams.update({"font.family": "serif", "font.serif": ["Times New Roman"]})
@@ -168,6 +169,65 @@ def _plot_histogram(max_values: np.ndarray, bins: int = 100, cluster: int = 0) -
     ax.set_title(f"Energy spectrum for cluster={cluster}", fontsize=13)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
+
+    # ------------------------------------------------------------------
+    # 在 10–11 keV 能区内寻找峰，并进行高斯 + 线性本底拟合
+    # ------------------------------------------------------------------
+    e_min, e_max = 10.0, 11.0
+    mask_roi = (bin_centers >= e_min) & (bin_centers <= e_max) & (rates > 0)
+
+    if np.count_nonzero(mask_roi) >= 5:
+        x_roi = bin_centers[mask_roi]
+        y_roi = rates[mask_roi]
+
+        # 初始参数估计
+        peak_idx = np.argmax(y_roi)
+        mu0 = x_roi[peak_idx]
+        amp0 = y_roi[peak_idx] - np.min(y_roi)
+        sigma0 = 0.05  # keV，经验初始值
+        c0 = np.min(y_roi)
+        d0 = 0.0
+
+        def gauss_linear(x, A, mu, sigma, c, d):
+            return A * np.exp(-0.5 * ((x - mu) / sigma) ** 2) + c + d * x
+
+        try:
+            popt, pcov = curve_fit(
+                gauss_linear,
+                x_roi,
+                y_roi,
+                p0=[amp0, mu0, sigma0, c0, d0],
+                maxfev=10000,
+            )
+            A_fit, mu_fit, sigma_fit, c_fit, d_fit = popt
+
+            # 计算 FWHM
+            fwhm = 2.0 * np.sqrt(2.0 * np.log(2.0)) * abs(sigma_fit)
+            print(f"10–11 keV 峰拟合结果: mu = {mu_fit:.4f} keV, FWHM = {fwhm:.4f} keV")
+
+            # 在新窗口内画出拟合函数与数据点
+            fig_fit, ax_fit = plt.subplots(1, 1, figsize=(8, 6))
+            ax_fit.scatter(x_roi, y_roi, color="C0", label="Data (10–11 keV)", zorder=3)
+
+            x_fit = np.linspace(x_roi.min(), x_roi.max(), 400)
+            y_fit = gauss_linear(x_fit, *popt)
+            ax_fit.plot(x_fit, y_fit, color="C1", label="Gaussian + linear fit")
+
+            ax_fit.set_xlabel("Energy (keV)", fontsize=12)
+            ax_fit.set_ylabel(r"Rate [counts / (keV·kg·day)]", fontsize=12)
+            ax_fit.set_title(
+                f"Peak fit in [{e_min}, {e_max}] keV\n"
+                f"mu = {mu_fit:.4f} keV, FWHM = {fwhm:.4f} keV",
+                fontsize=13,
+            )
+            ax_fit.grid(True, alpha=0.3)
+            ax_fit.legend()
+            fig_fit.tight_layout()
+        except Exception as exc:
+            print(f"10–11 keV 拟合失败: {exc}")
+    else:
+        print("10–11 keV 区间内有效点太少，跳过拟合。")
+
     plt.show()
 
 
@@ -215,7 +275,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cluster",
         type=int,
-        default=3,
+        default=0,
         help="要分析的 cluster label（默认 0）。",
     )
     parser.add_argument(

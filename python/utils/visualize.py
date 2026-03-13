@@ -352,7 +352,6 @@ def list_all_h5_files(base_dir: str = None) -> None:
 
 # 示例使用
 if __name__ == '__main__':
-
     # 列出所有文件
     print('列出所有 h5 文件:')
     list_all_h5_files()
@@ -367,7 +366,6 @@ if __name__ == '__main__':
         # 可视化第一个事件的第一个通道
         print(f'\n\n可视化单个波形:')
         #visualize_waveform(first_file, event_idx=0, channel_idx=0, time_unit='us', show_plot=True)
-        
         # 可视化多个通道的波形（同一事件）
         print(f'\n\n可视化多通道波形:')
         # 根据文件所在的目录决定显示哪些通道
