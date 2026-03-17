@@ -7,12 +7,13 @@
 import os
 import sys
 import struct
-import numpy as np
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
 import h5py
-
+import numpy as np
+import psutil
+import gc
 
 # 添加父目录到路径，以便导入utils模块
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -20,8 +21,6 @@ parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 from utils.save import save_hdf5
-from utils.fit import _compute_fast_fit_params
-from utils.frequency import _compute_fast_highfreq_energy_ratio
 
 # 定义文件路径和文件名（相对于项目根目录）
 # 从 python/data/ 目录到项目根目录的 data/ 目录
@@ -51,11 +50,345 @@ NAI_CHANNEL_LIST = [4]              # 指定要保存的NAI通道索引（4=CH4�
 EVENT_NUMBER = 10000    # 每个bin文件中的理论上事件数
 MAX_WINDOWS = 30000     # 时间窗 120μs （30000个时间点 x 4ns）
 
+
+def wait_for_memory_below(
+    max_used_percent: float = 95.0,
+    check_interval_sec: float = 5.0,) -> None:
+    """
+    简单的内存守门函数：
+    - 当当前进程所在机器的内存占用超过 max_used_percent 时，不继续往下读大文件，
+      而是等待一段时间后重试；
+    - 一旦内存占用恢复到阈值以下，立刻返回，让后续读取/计算继续。
+    """
+    while True:
+        mem = psutil.virtual_memory()
+        used = mem.percent
+        if used <= max_used_percent:
+            return
+        print(
+            f"[内存保护] 当前内存占用 {used:.1f}% > 阈值 {max_used_percent:.1f}%，"
+            f"暂停 {check_interval_sec:.1f}s 等待释放..."
+        )
+        time.sleep(check_interval_sec)
+
+def _compute_and_save_parameters(output_file, channel_list, channel_data, ch0parameters_save_dir):
+    """
+    基于给定的 channel_data / channel_list 和 output_file，
+    计算 CH0~CH5 的参数并写入各自的 *parameters 目录。
+    该函数既可在 bin2rawpulse 内部调用，也可在已有 h5 文件的基础上单独调用。
+    """
+    # 若包含 CH0 且指定了 ch0 参数目录，在解析时顺带计算并保存：
+    # - max_ch0: 每个事件 CH0 的最大值
+    # - tmax_ch0: 达峰时刻的 sample 索引
+    # - ch0ped_mean/ch0ped_var: 前 500 点（或不足 500 时全部）的均值和方差
+    # - ch0pedt_mean/ch0pedt_var: 后 500 点（或不足 500 时全部）的均值和方差
+    # - ch0ped_rms: 前 500 点对线性拟合残差的 RMS（CH0pedRMS）
+    # - ch0pedt_rms: 后 500 点对线性拟合残差的 RMS（CH0pedtRMS）
+    if ch0parameters_save_dir is not None and 0 in channel_list:
+        ch0_idx = channel_list.index(0)
+        ch0max_file = os.path.join(ch0parameters_save_dir, os.path.basename(output_file))
+        if not os.path.exists(ch0max_file):
+            os.makedirs(ch0parameters_save_dir, exist_ok=True)
+            ch0_wave = channel_data[:, ch0_idx, :]  # (n_samples, n_events)
+            ch0_wave_f32 = np.asarray(ch0_wave, dtype=np.float32)
+
+            # 达峰信息与最小值信息
+            max_vals = ch0_wave_f32.max(axis=0)
+            tmax_vals = np.argmax(ch0_wave_f32, axis=0).astype(np.uint32)
+            ch0_min = ch0_wave_f32.min(axis=0)
+
+            # pedestal: 前/后 500 点的均值和方差
+            n_samples = ch0_wave_f32.shape[0]
+            n_ped = min(500, n_samples)
+            front_seg = ch0_wave_f32[:n_ped, :]
+            back_seg = ch0_wave_f32[-n_ped:, :]
+
+            ch0ped_mean = front_seg.mean(axis=0)
+            ch0ped_var = front_seg.var(axis=0)
+            ch0pedt_mean = back_seg.mean(axis=0)
+            ch0pedt_var = back_seg.var(axis=0)
+
+            # 线性拟合 RMS（对每个 event，在前/后 500 点上做一次线性拟合 y = a x + b）
+            # x 取样本索引 0..n_ped-1，所有 event 共用一套 x
+            x = np.arange(n_ped, dtype=np.float32).reshape(-1, 1)           # (n_ped, 1)
+            x2_sum = float((x * x).sum())
+            x_sum = float(x.sum())
+            N = float(n_ped)
+            denom = N * x2_sum - x_sum * x_sum
+            if denom == 0:
+                # 极端情况（几乎不可能），退化为用均值拟合，RMS ~ 标准差
+                ch0ped_rms = np.sqrt(ch0ped_var)
+                ch0pedt_rms = np.sqrt(ch0pedt_var)
+            else:
+                # 前 500 点：front_seg 形状 (n_ped, n_events)
+                y_front = front_seg
+                y_sum_front = y_front.sum(axis=0)
+                xy_sum_front = (x * y_front).sum(axis=0)
+                a_front = (N * xy_sum_front - x_sum * y_sum_front) / denom
+                b_front = (y_sum_front - a_front * x_sum) / N
+                y_fit_front = a_front.reshape(1, -1) * x + b_front.reshape(1, -1)
+                resid_front = y_front - y_fit_front
+                ch0ped_rms = np.sqrt((resid_front * resid_front).mean(axis=0))
+
+                # 后 500 点：back_seg 形状 (n_ped, n_events)
+                y_back = back_seg
+                y_sum_back = y_back.sum(axis=0)
+                xy_sum_back = (x * y_back).sum(axis=0)
+                a_back = (N * xy_sum_back - x_sum * y_sum_back) / denom
+                b_back = (y_sum_back - a_back * x_sum) / N
+                y_fit_back = a_back.reshape(1, -1) * x + b_back.reshape(1, -1)
+                resid_back = y_back - y_fit_back
+                ch0pedt_rms = np.sqrt((resid_back * resid_back).mean(axis=0))
+
+            with h5py.File(ch0max_file, 'w') as f_dst:
+                f_dst.create_dataset('max_ch0', data=max_vals)
+                f_dst.create_dataset('tmax_ch0', data=tmax_vals)
+                f_dst.create_dataset('ch0_min', data=ch0_min)
+                f_dst.create_dataset('ch0ped_mean', data=ch0ped_mean)
+                f_dst.create_dataset('ch0ped_var', data=ch0ped_var)
+                f_dst.create_dataset('ch0pedt_mean', data=ch0pedt_mean)
+                f_dst.create_dataset('ch0pedt_var', data=ch0pedt_var)
+                f_dst.create_dataset('ch0ped_rms', data=ch0ped_rms)
+                f_dst.create_dataset('ch0pedt_rms', data=ch0pedt_rms)
+                f_dst.attrs['source_file'] = str(os.path.abspath(output_file))
+                f_dst.attrs['channel_index'] = int(ch0_idx)
+                f_dst.attrs['description'] = (
+                    'Per-event CH0 features: max, argmax(sample index), '
+                    'front/back pedestal (first/last samples) mean & var, '
+                    'and linear-fit RMS for front/back pedestal.'
+                )
+            print(f'CH0_parameters 已写入 {os.path.basename(ch0max_file)}')
+
+    # 对 CH1 做一模一样的参数化存储过程，输出到 CH1_parameters 目录
+    if 1 in channel_list:
+        ch1_idx = channel_list.index(1)
+        ch1_file = os.path.join(ch1parameters_save_path, os.path.basename(output_file))
+        if not os.path.exists(ch1_file):
+            os.makedirs(ch1parameters_save_path, exist_ok=True)
+            ch1_wave = channel_data[:, ch1_idx, :]  # (n_samples, n_events)
+            ch1_wave_f32 = np.asarray(ch1_wave, dtype=np.float32)
+
+            # 达峰信息与最小值信息
+            max_ch1 = ch1_wave_f32.max(axis=0)
+            tmax_ch1 = np.argmax(ch1_wave_f32, axis=0).astype(np.uint32)
+            ch1_min = ch1_wave_f32.min(axis=0)
+
+            # pedestal: 前/后 500 点的均值和方差
+            n_samples_1 = ch1_wave_f32.shape[0]
+            n_ped_1 = min(500, n_samples_1)
+            front_seg_1 = ch1_wave_f32[:n_ped_1, :]
+            back_seg_1 = ch1_wave_f32[-n_ped_1:, :]
+
+            ch1ped_mean = front_seg_1.mean(axis=0)
+            ch1ped_var = front_seg_1.var(axis=0)
+            ch1pedt_mean = back_seg_1.mean(axis=0)
+            ch1pedt_var = back_seg_1.var(axis=0)
+
+            # 线性拟合 RMS（CH1pedRMS / CH1pedtRMS）
+            x1 = np.arange(n_ped_1, dtype=np.float32).reshape(-1, 1)
+            x1_2_sum = float((x1 * x1).sum())
+            x1_sum = float(x1.sum())
+            N1 = float(n_ped_1)
+            denom1 = N1 * x1_2_sum - x1_sum * x1_sum
+            if denom1 == 0:
+                ch1ped_rms = np.sqrt(ch1ped_var)
+                ch1pedt_rms = np.sqrt(ch1pedt_var)
+            else:
+                y_front_1 = front_seg_1
+                y_sum_front_1 = y_front_1.sum(axis=0)
+                xy_sum_front_1 = (x1 * y_front_1).sum(axis=0)
+                a_front_1 = (N1 * xy_sum_front_1 - x1_sum * y_sum_front_1) / denom1
+                b_front_1 = (y_sum_front_1 - a_front_1 * x1_sum) / N1
+                y_fit_front_1 = a_front_1.reshape(1, -1) * x1 + b_front_1.reshape(1, -1)
+                resid_front_1 = y_front_1 - y_fit_front_1
+                ch1ped_rms = np.sqrt((resid_front_1 * resid_front_1).mean(axis=0))
+
+                y_back_1 = back_seg_1
+                y_sum_back_1 = y_back_1.sum(axis=0)
+                xy_sum_back_1 = (x1 * y_back_1).sum(axis=0)
+                a_back_1 = (N1 * xy_sum_back_1 - x1_sum * y_sum_back_1) / denom1
+                b_back_1 = (y_sum_back_1 - a_back_1 * x1_sum) / N1
+                y_fit_back_1 = a_back_1.reshape(1, -1) * x1 + b_back_1.reshape(1, -1)
+                resid_back_1 = y_back_1 - y_fit_back_1
+                ch1pedt_rms = np.sqrt((resid_back_1 * resid_back_1).mean(axis=0))
+
+            with h5py.File(ch1_file, 'w') as f_ch1:
+                f_ch1.create_dataset('max_ch1', data=max_ch1)
+                f_ch1.create_dataset('tmax_ch1', data=tmax_ch1)
+                f_ch1.create_dataset('ch1_min', data=ch1_min)
+                f_ch1.create_dataset('ch1ped_mean', data=ch1ped_mean)
+                f_ch1.create_dataset('ch1ped_var', data=ch1ped_var)
+                f_ch1.create_dataset('ch1pedt_mean', data=ch1pedt_mean)
+                f_ch1.create_dataset('ch1pedt_var', data=ch1pedt_var)
+                f_ch1.create_dataset('ch1ped_rms', data=ch1ped_rms)
+                f_ch1.create_dataset('ch1pedt_rms', data=ch1pedt_rms)
+                f_ch1.attrs['source_file'] = str(os.path.abspath(output_file))
+                f_ch1.attrs['channel_index'] = int(ch1_idx)
+                f_ch1.attrs['description'] = (
+                    'Per-event CH1 features: max, argmax(sample index), min, '
+                    'front/back pedestal (first/last samples) mean & var, '
+                    'and linear-fit RMS for front/back pedestal.'
+                )
+            print(f'CH1_parameters 已写入 {os.path.basename(ch1_file)}')
+
+    # CH2/CH3 的拟合和高频能量占比改为在独立脚本中并行处理，
+    # 这里不再计算，以便在那个阶段独占全部 CPU。
+
+    # CH4：保存每个事件的最大值及达峰时间
+    if 4 in channel_list:
+        ch4_idx = channel_list.index(4)
+        ch4_file = os.path.join(ch4parameters_save_path, os.path.basename(output_file))
+        if not os.path.exists(ch4_file):
+            os.makedirs(ch4parameters_save_path, exist_ok=True)
+            ch4_wave = channel_data[:, ch4_idx, :]  # (n_samples, n_events)
+            ch4_wave_f32 = np.asarray(ch4_wave, dtype=np.float32)
+            max_ch4 = ch4_wave_f32.max(axis=0)
+            tmax_ch4 = np.argmax(ch4_wave_f32, axis=0).astype(np.uint32)
+
+            with h5py.File(ch4_file, 'w') as f_ch4:
+                f_ch4.create_dataset('max_ch4', data=max_ch4)
+                f_ch4.create_dataset('tmax_ch4', data=tmax_ch4)
+                f_ch4.attrs['source_file'] = str(os.path.abspath(output_file))
+                f_ch4.attrs['channel_index'] = int(ch4_idx)
+                f_ch4.attrs['description'] = (
+                    'Per-event CH4 features: maximum value and argmax(sample index).'
+                )
+            print(f'CH4_parameters 已写入 {os.path.basename(ch4_file)}')
+
+    # CH5：仅保存每个事件的最大值
+    if 5 in channel_list:
+        ch5_idx = channel_list.index(5)
+        ch5_file = os.path.join(ch5parameters_save_path, os.path.basename(output_file))
+        if not os.path.exists(ch5_file):
+            os.makedirs(ch5parameters_save_path, exist_ok=True)
+            ch5_wave = channel_data[:, ch5_idx, :]  # (n_samples, n_events)
+            ch5_wave_f32 = np.asarray(ch5_wave, dtype=np.float32)
+            max_ch5 = ch5_wave_f32.max(axis=0)
+
+            with h5py.File(ch5_file, 'w') as f_ch5:
+                f_ch5.create_dataset('max_ch5', data=max_ch5)
+                f_ch5.attrs['source_file'] = str(os.path.abspath(output_file))
+                f_ch5.attrs['channel_index'] = int(ch5_idx)
+                f_ch5.attrs['description'] = (
+                    'Per-event CH5 feature: maximum value only.'
+                )
+            print(f'CH5_parameters 已写入 {os.path.basename(ch5_file)}')
+
+def compute_parameters_from_existing_h5(output_file, channel_list, ch0parameters_save_dir):
+    """
+    当原始 CHx h5 已经存在时，仅基于现有 h5 中的 channel_data 计算并写入参数。
+    不再重复读取 bin 文件。
+
+    注意：为降低内存峰值，这里对部分通道采用“流式”计算，避免一次性读入整个
+    channel_data 三维数组。
+    """
+    # 在读取大数据前先检查整体内存占用
+    wait_for_memory_below()
+
+    with h5py.File(output_file, 'r') as f_src:
+        dset = f_src['channel_data']
+
+        # 仅包含 CH4：需要每个事件的最大值及达峰时间，可按样本维度分块流式计算
+        if channel_list == NAI_CHANNEL_LIST:
+            time_samples, num_channels, num_events = dset.shape
+            if num_channels != 1:
+                raise ValueError(
+                    f"预期 CH4 原始 h5 只有 1 个通道，但实际 num_channels={num_channels}"
+                )
+
+            print(f"[参数计算] 基于已有 CH4 h5 计算 CH4_parameters：{output_file}")
+            max_ch4 = np.full(num_events, -np.inf, dtype=np.float32)
+            tmax_ch4 = np.zeros(num_events, dtype=np.int64)
+
+            # 按时间样本维度分块，逐步更新每个事件的最大值及对应的 sample 索引
+            chunk_size = 1024
+            for start in range(0, time_samples, chunk_size):
+                end = min(start + chunk_size, time_samples)
+                # 只读取 [start:end] 这一小段的 CH4 数据，显著降低内存占用
+                chunk = dset[start:end, 0, :]  # 形状 (chunk_len, n_events)
+                # 对每个事件在当前块内找到最大值及局部索引
+                local_argmax = np.argmax(chunk, axis=0)               # (n_events,)
+                chunk_max = chunk[local_argmax, np.arange(num_events)]  # (n_events,)
+
+                # 找到那些通过当前块更新了全局最大值的事件
+                mask_update = chunk_max > max_ch4
+                # 更新这些事件的全局最大值与对应的全局达峰 sample 索引
+                max_ch4[mask_update] = chunk_max[mask_update].astype(np.float32)
+                tmax_ch4[mask_update] = start + local_argmax[mask_update]
+
+            ch4_file = output_file.replace(
+                os.path.join('raw_pulse', 'CH4'),
+                os.path.join('raw_pulse', 'CH4_parameters'),
+            )
+            ch4_dir = os.path.dirname(ch4_file)
+            os.makedirs(ch4_dir, exist_ok=True)
+
+            with h5py.File(ch4_file, 'w') as f_ch4:
+                f_ch4.create_dataset('max_ch4', data=max_ch4)
+                f_ch4.create_dataset('tmax_ch4', data=tmax_ch4.astype(np.uint32))
+                f_ch4.attrs['source_file'] = str(os.path.abspath(output_file))
+                f_ch4.attrs['channel_index'] = int(4)
+                f_ch4.attrs['description'] = (
+                    'Per-event CH4 features: maximum value and argmax(sample index) (streamed).'
+                )
+
+            print(f'CH4_parameters 已写入 {os.path.basename(ch4_file)}')
+            return
+
+        # 仅包含 CH5：同样只需要每个事件的最大值，按样本维度分块流式计算
+        if channel_list == TRIGGER_CHANNEL_LIST:
+            time_samples, num_channels, num_events = dset.shape
+            if num_channels != 1:
+                raise ValueError(
+                    f"预期 CH5 原始 h5 只有 1 个通道，但实际 num_channels={num_channels}"
+                )
+
+            print(f"[参数计算] 基于已有 CH5 h5 计算 CH5_parameters：{output_file}")
+            max_ch5 = np.full(num_events, -np.inf, dtype=np.float32)
+
+            chunk_size = 1024
+            for start in range(0, time_samples, chunk_size):
+                end = min(start + chunk_size, time_samples)
+                chunk = dset[start:end, 0, :]  # (chunk_len, n_events)
+                chunk_max = chunk.max(axis=0).astype(np.float32)
+                max_ch5 = np.maximum(max_ch5, chunk_max)
+
+            ch5_file = output_file.replace(
+                os.path.join('raw_pulse', 'CH5'),
+                os.path.join('raw_pulse', 'CH5_parameters'),
+            )
+            ch5_dir = os.path.dirname(ch5_file)
+            os.makedirs(ch5_dir, exist_ok=True)
+
+            with h5py.File(ch5_file, 'w') as f_ch5:
+                f_ch5.create_dataset('max_ch5', data=max_ch5)
+                f_ch5.attrs['source_file'] = str(os.path.abspath(output_file))
+                f_ch5.attrs['channel_index'] = int(5)
+                f_ch5.attrs['description'] = 'Per-event CH5 feature: maximum value only (streamed).'
+
+            print(f'CH5_parameters 已写入 {os.path.basename(ch5_file)}')
+            return
+
+        # 其他情况（主要是 CH0-3）：仍然需要完整的 channel_data 做 pedestal 等复杂参数，
+        # 这里维持一次性读入，但配合外层内存阈值与显式释放，尽量降低整体压力。
+        channel_data = dset[...]
+
+    try:
+        _compute_and_save_parameters(
+            output_file=output_file,
+            channel_list=channel_list,
+            channel_data=channel_data,
+            ch0parameters_save_dir=ch0parameters_save_dir,
+        )
+    finally:
+        # 显式释放大数组引用并触发一次垃圾回收，以尽快归还内存
+        del channel_data
+        gc.collect()
+
 def bin2rawpulse(run_filename, channel_list, event_number, save_path, ch0parameters_save_dir=None):
     """
     处理bin文件中对应channel_list通道的原始波形并且保存。
     若 channel_list 包含 CH0(0) 且 ch0parameters_save_dir 给定，则顺带计算并保存 CH0 的特征参数。
-
     参数:
         run_filename: 输入文件路径
         channel_list: 要保存的通道索引列表（例如 [0, 1, 2, 3] 表示CH0-CH3）
@@ -65,6 +398,10 @@ def bin2rawpulse(run_filename, channel_list, event_number, save_path, ch0paramet
     """
     print('=' * 45)
     print(f'Opening {run_filename}')
+
+    # 在每个 worker 真正开始读 bin 并分配大数组之前，先进行一次内存水位检查。
+    # 当内存占用过高时，当前任务会在这里等待，直到有足够空闲内存再继续。
+    wait_for_memory_below()
 
     # 打开文件
     fid = None
@@ -270,306 +607,22 @@ def bin2rawpulse(run_filename, channel_list, event_number, save_path, ch0paramet
         output_file = f'{base_filename}.h5'
         save_hdf5(output_file, mdict)
 
-        # 若包含 CH0 且指定了 ch0 参数目录，在解析时顺带计算并保存：
-        # - max_ch0: 每个事件 CH0 的最大值
-        # - tmax_ch0: 达峰时刻的 sample 索引
-        # - ch0ped_mean/ch0ped_var: 前 500 点（或不足 500 时全部）的均值和方差
-        # - ch0pedt_mean/ch0pedt_var: 后 500 点（或不足 500 时全部）的均值和方差
-        # - ch0ped_rms: 前 500 点对线性拟合残差的 RMS（CH0pedRMS）
-        # - ch0pedt_rms: 后 500 点对线性拟合残差的 RMS（CH0pedtRMS）
-        if ch0parameters_save_dir is not None and 0 in channel_list:
-            ch0_idx = channel_list.index(0)
-            ch0max_file = os.path.join(ch0parameters_save_dir, os.path.basename(output_file))
-            if not os.path.exists(ch0max_file):
-                os.makedirs(ch0parameters_save_dir, exist_ok=True)
-                ch0_wave = channel_data[:, ch0_idx, :]  # (n_samples, n_events)
-                ch0_wave_f32 = np.asarray(ch0_wave, dtype=np.float32)
+        # 基于当前 channel_data 计算各通道参数并写入对应的 *parameters 目录
+        try:
+            _compute_and_save_parameters(
+                output_file=output_file,
+                channel_list=channel_list,
+                channel_data=channel_data,
+                ch0parameters_save_dir=ch0parameters_save_dir,
+            )
+        finally:
+            # 无论参数计算是否成功，都尽快释放大数组和中间缓存
+            del channel_data
+            del hit_pat_array, v1729_tg_rec_array, evt_endtime_array
+            del v1725_1_tgno_array, v1725_1_tag_array
+            del idevt, trig, time_array, deadtime, time_data
+            gc.collect()
 
-                # 达峰信息
-                max_vals = ch0_wave_f32.max(axis=0)
-                tmax_vals = np.argmax(ch0_wave_f32, axis=0).astype(np.uint32)
-
-                # pedestal: 前/后 500 点的均值和方差
-                n_samples = ch0_wave_f32.shape[0]
-                n_ped = min(500, n_samples)
-                front_seg = ch0_wave_f32[:n_ped, :]
-                back_seg = ch0_wave_f32[-n_ped:, :]
-
-                ch0ped_mean = front_seg.mean(axis=0)
-                ch0ped_var = front_seg.var(axis=0)
-                ch0pedt_mean = back_seg.mean(axis=0)
-                ch0pedt_var = back_seg.var(axis=0)
-
-                # 线性拟合 RMS（对每个 event，在前/后 500 点上做一次线性拟合 y = a x + b）
-                # x 取样本索引 0..n_ped-1，所有 event 共用一套 x
-                x = np.arange(n_ped, dtype=np.float32).reshape(-1, 1)           # (n_ped, 1)
-                x2_sum = float((x * x).sum())
-                x_sum = float(x.sum())
-                N = float(n_ped)
-                denom = N * x2_sum - x_sum * x_sum
-                if denom == 0:
-                    # 极端情况（几乎不可能），退化为用均值拟合，RMS ~ 标准差
-                    ch0ped_rms = np.sqrt(ch0ped_var)
-                    ch0pedt_rms = np.sqrt(ch0pedt_var)
-                else:
-                    # 前 500 点：front_seg 形状 (n_ped, n_events)
-                    y_front = front_seg
-                    y_sum_front = y_front.sum(axis=0)
-                    xy_sum_front = (x * y_front).sum(axis=0)
-                    a_front = (N * xy_sum_front - x_sum * y_sum_front) / denom
-                    b_front = (y_sum_front - a_front * x_sum) / N
-                    y_fit_front = a_front.reshape(1, -1) * x + b_front.reshape(1, -1)
-                    resid_front = y_front - y_fit_front
-                    ch0ped_rms = np.sqrt((resid_front * resid_front).mean(axis=0))
-
-                    # 后 500 点：back_seg 形状 (n_ped, n_events)
-                    y_back = back_seg
-                    y_sum_back = y_back.sum(axis=0)
-                    xy_sum_back = (x * y_back).sum(axis=0)
-                    a_back = (N * xy_sum_back - x_sum * y_sum_back) / denom
-                    b_back = (y_sum_back - a_back * x_sum) / N
-                    y_fit_back = a_back.reshape(1, -1) * x + b_back.reshape(1, -1)
-                    resid_back = y_back - y_fit_back
-                    ch0pedt_rms = np.sqrt((resid_back * resid_back).mean(axis=0))
-
-                with h5py.File(ch0max_file, 'w') as f_dst:
-                    f_dst.create_dataset('max_ch0', data=max_vals)
-                    f_dst.create_dataset('tmax_ch0', data=tmax_vals)
-                    f_dst.create_dataset('ch0ped_mean', data=ch0ped_mean)
-                    f_dst.create_dataset('ch0ped_var', data=ch0ped_var)
-                    f_dst.create_dataset('ch0pedt_mean', data=ch0pedt_mean)
-                    f_dst.create_dataset('ch0pedt_var', data=ch0pedt_var)
-                    f_dst.create_dataset('ch0ped_rms', data=ch0ped_rms)
-                    f_dst.create_dataset('ch0pedt_rms', data=ch0pedt_rms)
-                    f_dst.attrs['source_file'] = str(os.path.abspath(output_file))
-                    f_dst.attrs['channel_index'] = int(ch0_idx)
-                    f_dst.attrs['description'] = (
-                        'Per-event CH0 features: max, argmax(sample index), '
-                        'front/back pedestal (first/last samples) mean & var, '
-                        'and linear-fit RMS for front/back pedestal.'
-                    )
-                print(f'CH0_parameters 已写入 {os.path.basename(ch0max_file)}')
-
-        # 对 CH1 做一模一样的参数化存储过程，输出到 CH1_parameters 目录
-        if 1 in channel_list:
-            ch1_idx = channel_list.index(1)
-            ch1_file = os.path.join(ch1parameters_save_path, os.path.basename(output_file))
-            if not os.path.exists(ch1_file):
-                os.makedirs(ch1parameters_save_path, exist_ok=True)
-                ch1_wave = channel_data[:, ch1_idx, :]  # (n_samples, n_events)
-                ch1_wave_f32 = np.asarray(ch1_wave, dtype=np.float32)
-
-                # 达峰信息
-                max_ch1 = ch1_wave_f32.max(axis=0)
-                tmax_ch1 = np.argmax(ch1_wave_f32, axis=0).astype(np.uint32)
-
-                # pedestal: 前/后 500 点的均值和方差
-                n_samples_1 = ch1_wave_f32.shape[0]
-                n_ped_1 = min(500, n_samples_1)
-                front_seg_1 = ch1_wave_f32[:n_ped_1, :]
-                back_seg_1 = ch1_wave_f32[-n_ped_1:, :]
-
-                ch1ped_mean = front_seg_1.mean(axis=0)
-                ch1ped_var = front_seg_1.var(axis=0)
-                ch1pedt_mean = back_seg_1.mean(axis=0)
-                ch1pedt_var = back_seg_1.var(axis=0)
-
-                # 线性拟合 RMS（CH1pedRMS / CH1pedtRMS）
-                x1 = np.arange(n_ped_1, dtype=np.float32).reshape(-1, 1)
-                x1_2_sum = float((x1 * x1).sum())
-                x1_sum = float(x1.sum())
-                N1 = float(n_ped_1)
-                denom1 = N1 * x1_2_sum - x1_sum * x1_sum
-                if denom1 == 0:
-                    ch1ped_rms = np.sqrt(ch1ped_var)
-                    ch1pedt_rms = np.sqrt(ch1pedt_var)
-                else:
-                    y_front_1 = front_seg_1
-                    y_sum_front_1 = y_front_1.sum(axis=0)
-                    xy_sum_front_1 = (x1 * y_front_1).sum(axis=0)
-                    a_front_1 = (N1 * xy_sum_front_1 - x1_sum * y_sum_front_1) / denom1
-                    b_front_1 = (y_sum_front_1 - a_front_1 * x1_sum) / N1
-                    y_fit_front_1 = a_front_1.reshape(1, -1) * x1 + b_front_1.reshape(1, -1)
-                    resid_front_1 = y_front_1 - y_fit_front_1
-                    ch1ped_rms = np.sqrt((resid_front_1 * resid_front_1).mean(axis=0))
-
-                    y_back_1 = back_seg_1
-                    y_sum_back_1 = y_back_1.sum(axis=0)
-                    xy_sum_back_1 = (x1 * y_back_1).sum(axis=0)
-                    a_back_1 = (N1 * xy_sum_back_1 - x1_sum * y_sum_back_1) / denom1
-                    b_back_1 = (y_sum_back_1 - a_back_1 * x1_sum) / N1
-                    y_fit_back_1 = a_back_1.reshape(1, -1) * x1 + b_back_1.reshape(1, -1)
-                    resid_back_1 = y_back_1 - y_fit_back_1
-                    ch1pedt_rms = np.sqrt((resid_back_1 * resid_back_1).mean(axis=0))
-
-                with h5py.File(ch1_file, 'w') as f_ch1:
-                    f_ch1.create_dataset('max_ch1', data=max_ch1)
-                    f_ch1.create_dataset('tmax_ch1', data=tmax_ch1)
-                    f_ch1.create_dataset('ch1ped_mean', data=ch1ped_mean)
-                    f_ch1.create_dataset('ch1ped_var', data=ch1ped_var)
-                    f_ch1.create_dataset('ch1pedt_mean', data=ch1pedt_mean)
-                    f_ch1.create_dataset('ch1pedt_var', data=ch1pedt_var)
-                    f_ch1.create_dataset('ch1ped_rms', data=ch1ped_rms)
-                    f_ch1.create_dataset('ch1pedt_rms', data=ch1pedt_rms)
-                    f_ch1.attrs['source_file'] = str(os.path.abspath(output_file))
-                    f_ch1.attrs['channel_index'] = int(ch1_idx)
-                    f_ch1.attrs['description'] = (
-                        'Per-event CH1 features: max, argmax(sample index), '
-                        'front/back pedestal (first/last samples) mean & var, '
-                        'and linear-fit RMS for front/back pedestal.'
-                    )
-                print(f'CH1_parameters 已写入 {os.path.basename(ch1_file)}')
-
-        # 对 CH2 和 CH3 使用快速拟合函数进行参数化，并分别写入 CH2_parameters / CH3_parameters
-        # 仅计算一次：若对应参数文件已存在则跳过
-
-        # CH2
-        if 2 in channel_list:
-            ch2_idx = channel_list.index(2)
-            ch2_file = os.path.join(ch2parameters_save_path, os.path.basename(output_file))
-            if not os.path.exists(ch2_file):
-                os.makedirs(ch2parameters_save_path, exist_ok=True)
-                ch2_wave = channel_data[:, ch2_idx, :]  # (n_samples, n_events)
-                ch2_wave_f32 = np.asarray(ch2_wave, dtype=np.float32)
-                n_events_2 = ch2_wave_f32.shape[1]
-
-                tanh_p0_2 = np.empty(n_events_2, dtype=np.float32)
-                tanh_p1_2 = np.empty(n_events_2, dtype=np.float32)
-                tanh_p2_2 = np.empty(n_events_2, dtype=np.float32)
-                tanh_p3_2 = np.empty(n_events_2, dtype=np.float32)
-                tanh_rms_2 = np.empty(n_events_2, dtype=np.float32)
-                highfreq_energy_ratio_2 = np.empty(n_events_2, dtype=np.float32)
-
-                for ev in range(n_events_2):
-                    wave_ev_2 = ch2_wave_f32[:, ev]
-                    params = _compute_fast_fit_params(wave_ev_2)
-                    tanh_p0_2[ev] = params["tanh_p0"]
-                    tanh_p1_2[ev] = params["tanh_p1"]
-                    tanh_p2_2[ev] = params["tanh_p2"]
-                    tanh_p3_2[ev] = params["tanh_p3"]
-                    tanh_rms_2[ev] = params["tanh_rms"]
-
-                    # 计算高频能量占比，并写入 CH2_parameters
-                    highfreq_energy_ratio_2[ev] = _compute_fast_highfreq_energy_ratio(
-                        wave_ev_2
-                    )
-
-                    # 简单进度条：每完成约 5% 或最后一个事件时打印一次
-                    if n_events_2 >= 20:
-                        step = max(1, n_events_2 // 20)
-                        if (ev + 1) % step == 0 or ev + 1 == n_events_2:
-                            pct = 100.0 * (ev + 1) / n_events_2
-                            print(f'CH2 拟合进度: {ev + 1}/{n_events_2} ({pct:.1f}%)')
-                print('CH2 拟合完成')
-
-                with h5py.File(ch2_file, 'w') as f_ch2:
-                    f_ch2.create_dataset('tanh_p0', data=tanh_p0_2)
-                    f_ch2.create_dataset('tanh_p1', data=tanh_p1_2)
-                    f_ch2.create_dataset('tanh_p2', data=tanh_p2_2)
-                    f_ch2.create_dataset('tanh_p3', data=tanh_p3_2)
-                    f_ch2.create_dataset('tanh_rms', data=tanh_rms_2)
-                    f_ch2.create_dataset('highfreq_energy_ratio', data=highfreq_energy_ratio_2)
-                    f_ch2.attrs['source_file'] = str(os.path.abspath(output_file))
-                    f_ch2.attrs['channel_index'] = int(ch2_idx)
-                    f_ch2.attrs['description'] = (
-                        'Per-event CH2 fast tanh-fit parameters (p0, p1, p2, p3, rms) '
-                        'and high-frequency energy ratio (>0.2 MHz).'
-                    )
-                print(f'CH2_parameters 已写入 {os.path.basename(ch2_file)}')
-
-        # CH3
-        if 3 in channel_list:
-            ch3_idx = channel_list.index(3)
-            ch3_file = os.path.join(ch3parameters_save_path, os.path.basename(output_file))
-            if not os.path.exists(ch3_file):
-                os.makedirs(ch3parameters_save_path, exist_ok=True)
-                ch3_wave = channel_data[:, ch3_idx, :]  # (n_samples, n_events)
-                ch3_wave_f32 = np.asarray(ch3_wave, dtype=np.float32)
-                n_events_3 = ch3_wave_f32.shape[1]
-
-                tanh_p0_3 = np.empty(n_events_3, dtype=np.float32)
-                tanh_p1_3 = np.empty(n_events_3, dtype=np.float32)
-                tanh_p2_3 = np.empty(n_events_3, dtype=np.float32)
-                tanh_p3_3 = np.empty(n_events_3, dtype=np.float32)
-                tanh_rms_3 = np.empty(n_events_3, dtype=np.float32)
-                highfreq_energy_ratio_3 = np.empty(n_events_3, dtype=np.float32)
-
-                print(f'CH3 拟合开始，总事件数: {n_events_3}')
-                for ev in range(n_events_3):
-                    wave_ev = ch3_wave_f32[:, ev]
-                    params = _compute_fast_fit_params(wave_ev)
-                    tanh_p0_3[ev] = params["tanh_p0"]
-                    tanh_p1_3[ev] = params["tanh_p1"]
-                    tanh_p2_3[ev] = params["tanh_p2"]
-                    tanh_p3_3[ev] = params["tanh_p3"]
-                    tanh_rms_3[ev] = params["tanh_rms"]
-
-                    # 计算快放高频能量占比，并写入 CH3_parameters
-                    highfreq_energy_ratio_3[ev] = _compute_fast_highfreq_energy_ratio(
-                        wave_ev
-                    )
-
-                    # 简单进度条：每完成约 5% 或最后一个事件时打印一次
-                    if n_events_3 >= 20:
-                        step = max(1, n_events_3 // 20)
-                        if (ev + 1) % step == 0 or ev + 1 == n_events_3:
-                            pct = 100.0 * (ev + 1) / n_events_3
-                            print(f'CH3 拟合进度: {ev + 1}/{n_events_3} ({pct:.1f}%)')
-                print('CH3 拟合完成')
-
-                with h5py.File(ch3_file, 'w') as f_ch3:
-                    f_ch3.create_dataset('tanh_p0', data=tanh_p0_3)
-                    f_ch3.create_dataset('tanh_p1', data=tanh_p1_3)
-                    f_ch3.create_dataset('tanh_p2', data=tanh_p2_3)
-                    f_ch3.create_dataset('tanh_p3', data=tanh_p3_3)
-                    f_ch3.create_dataset('tanh_rms', data=tanh_rms_3)
-                    f_ch3.create_dataset('highfreq_energy_ratio', data=highfreq_energy_ratio_3)
-                    f_ch3.attrs['source_file'] = str(os.path.abspath(output_file))
-                    f_ch3.attrs['channel_index'] = int(ch3_idx)
-                    f_ch3.attrs['description'] = (
-                        'Per-event CH3 fast tanh-fit parameters (p0, p1, p2, p3, rms) '
-                        'and high-frequency energy ratio (>0.2 MHz).'
-                    )
-                print(f'CH3_parameters 已写入 {os.path.basename(ch3_file)}')
-
-        # CH4：仅保存每个事件的最大值
-        if 4 in channel_list:
-            ch4_idx = channel_list.index(4)
-            ch4_file = os.path.join(ch4parameters_save_path, os.path.basename(output_file))
-            if not os.path.exists(ch4_file):
-                os.makedirs(ch4parameters_save_path, exist_ok=True)
-                ch4_wave = channel_data[:, ch4_idx, :]  # (n_samples, n_events)
-                ch4_wave_f32 = np.asarray(ch4_wave, dtype=np.float32)
-                max_ch4 = ch4_wave_f32.max(axis=0)
-
-                with h5py.File(ch4_file, 'w') as f_ch4:
-                    f_ch4.create_dataset('max_ch4', data=max_ch4)
-                    f_ch4.attrs['source_file'] = str(os.path.abspath(output_file))
-                    f_ch4.attrs['channel_index'] = int(ch4_idx)
-                    f_ch4.attrs['description'] = (
-                        'Per-event CH4 feature: maximum value only.'
-                    )
-                print(f'CH4_parameters 已写入 {os.path.basename(ch4_file)}')
-
-        # CH5：仅保存每个事件的最大值
-        if 5 in channel_list:
-            ch5_idx = channel_list.index(5)
-            ch5_file = os.path.join(ch5parameters_save_path, os.path.basename(output_file))
-            if not os.path.exists(ch5_file):
-                os.makedirs(ch5parameters_save_path, exist_ok=True)
-                ch5_wave = channel_data[:, ch5_idx, :]  # (n_samples, n_events)
-                ch5_wave_f32 = np.asarray(ch5_wave, dtype=np.float32)
-                max_ch5 = ch5_wave_f32.max(axis=0)
-
-                with h5py.File(ch5_file, 'w') as f_ch5:
-                    f_ch5.create_dataset('max_ch5', data=max_ch5)
-                    f_ch5.attrs['source_file'] = str(os.path.abspath(output_file))
-                    f_ch5.attrs['channel_index'] = int(ch5_idx)
-                    f_ch5.attrs['description'] = (
-                        'Per-event CH5 feature: maximum value only.'
-                    )
-                print(f'CH5_parameters 已写入 {os.path.basename(ch5_file)}')
-        
         print(f'保存完成，耗时: {time.time() - start_time:.2f}秒')
         #print(f'输出文件路径: {os.path.abspath(output_file)}')
         #print(f'MATLAB读取方式: channel_data = h5read("{os.path.basename(output_file)}", "/channel_data");')
@@ -593,27 +646,33 @@ def bin2rawpulse(run_filename, channel_list, event_number, save_path, ch0paramet
 def main():
     """主函数 - 使用多进程并行处理"""
     # 生成所有任务列表
-    tasks = []
+    tasks = []         # 需要从 bin 读取并生成原始 h5 的任务
+    param_tasks = []   # 已有原始 h5，仅需补参数的任务
     for i in range(RUN_Start_NUMBER, RUN_End_NUMBER + 1):
         run_filename = os.path.join(read_path, f'{filename_input}FADC_RAW_Data_{i}.bin')
         filename = os.path.basename(run_filename)
         base_name = os.path.splitext(filename)[0]
         # 为每个文件添加任务：AMP通道、TRIGGER通道和NAI通道
-        # 仅当对应输出文件夹下该文件的所有 h5（CH0-3 + CH0/CH1/CH2/CH3 参数）都已存在时才跳过
+        # 对于 AMP（CH0-3）：若原始 h5 不存在则跑 bin2rawpulse；若原始 h5 存在但参数不全，则只基于 h5 计算参数
         amp_output_file = os.path.join(amp_save_path, f'{base_name}_processed.h5')
         ch0param_output_file = os.path.join(ch0parameters_save_path, f'{base_name}_processed.h5')
         ch1param_output_file = os.path.join(ch1parameters_save_path, f'{base_name}_processed.h5')
         ch2param_output_file = os.path.join(ch2parameters_save_path, f'{base_name}_processed.h5')
         ch3param_output_file = os.path.join(ch3parameters_save_path, f'{base_name}_processed.h5')
-        amp_complete = (
-            os.path.exists(amp_output_file)
-            and os.path.exists(ch0param_output_file)
+        amp_raw_exists = os.path.exists(amp_output_file)
+        amp_params_complete = (
+            os.path.exists(ch0param_output_file)
             and os.path.exists(ch1param_output_file)
             and os.path.exists(ch2param_output_file)
             and os.path.exists(ch3param_output_file)
         )
-        if not amp_complete:
+
+        if not amp_raw_exists:
+            # 原始 CH0-3 h5 不存在：必须从 bin 解析
             tasks.append((run_filename, AMP_CHANNEL_LIST, EVENT_NUMBER, amp_save_path, ch0parameters_save_path))
+        elif not amp_params_complete:
+            # 原始 h5 已有，但参数不全：只补参数
+            param_tasks.append((amp_output_file, AMP_CHANNEL_LIST, ch0parameters_save_path))
         else:
             print(
                 f'跳过 {run_filename} (通道: {AMP_CHANNEL_LIST})，'
@@ -621,49 +680,95 @@ def main():
             )
 
         trigger_output_file = os.path.join(trigger_save_path, f'{base_name}_processed.h5')
-        if not os.path.exists(trigger_output_file):
+        ch5param_output_file = os.path.join(ch5parameters_save_path, f'{base_name}_processed.h5')
+        trigger_raw_exists = os.path.exists(trigger_output_file)
+        ch5param_exists = os.path.exists(ch5param_output_file)
+        if not trigger_raw_exists:
+            # 随机触发原始 h5 不存在：从 bin 解析
             tasks.append((run_filename, TRIGGER_CHANNEL_LIST, EVENT_NUMBER, trigger_save_path, None))
+        elif not ch5param_exists:
+            # 仅缺少 CH5_parameters：基于已有 h5 计算
+            param_tasks.append((trigger_output_file, TRIGGER_CHANNEL_LIST, None))
         else:
-            print(f'跳过 {run_filename} (通道: {TRIGGER_CHANNEL_LIST})，已存在: {trigger_output_file}')
+            print(
+                f'跳过 {run_filename} (通道: {TRIGGER_CHANNEL_LIST})，'
+                f'CH5 与 CH5_parameters 文件均已存在'
+            )
 
         nai_output_file = os.path.join(NAI_save_path, f'{base_name}_processed.h5')
-        if not os.path.exists(nai_output_file):
+        ch4param_output_file = os.path.join(ch4parameters_save_path, f'{base_name}_processed.h5')
+        nai_raw_exists = os.path.exists(nai_output_file)
+        ch4param_exists = os.path.exists(ch4param_output_file)
+        if not nai_raw_exists:
+            # CH4 原始 h5 不存在：从 bin 解析
             tasks.append((run_filename, NAI_CHANNEL_LIST, EVENT_NUMBER, NAI_save_path, None))
+        elif not ch4param_exists:
+            # 仅缺少 CH4_parameters：基于已有 h5 计算
+            param_tasks.append((nai_output_file, NAI_CHANNEL_LIST, None))
         else:
-            print(f'跳过 {run_filename} (通道: {NAI_CHANNEL_LIST})，已存在: {nai_output_file}')
+            print(
+                f'跳过 {run_filename} (通道: {NAI_CHANNEL_LIST})，'
+                f'CH4 与 CH4_parameters 文件均已存在'
+            )
 
-    # 获取可用CPU核心数，最多使用所有核心
-    max_workers = os.cpu_count()
-    print(f'使用 {max_workers} 个CPU核心进行并行处理')
-    print(f'共 {len(tasks)} 个任务')
+    # 根据机器内存和 CPU 情况自适应限制并行 worker 数，避免内存爆掉
+    total_mem_gb = psutil.virtual_memory().total / (1024 ** 3)
+    # 粗略估计：每个 worker 预留 ~4GB，如果机器内存较小则至少保留 1 个 worker
+    max_workers_by_mem = max(1, int(total_mem_gb // 4))
+    cpu_count = os.cpu_count() or 1
+    max_workers = max(1, min(cpu_count, max_workers_by_mem))
 
-    # 使用进程池并行执行
+    print(f'CPU 核心数: {cpu_count}，物理内存: {total_mem_gb:.1f} GB，'
+          f'限制并行 worker 数为: {max_workers}')
+    print(f'共 {len(tasks)} 个 bin 解析任务，{len(param_tasks)} 个仅参数任务')
+
     start_time = time.time()
     success_count = 0
     fail_count = 0
-    
+
+    # 使用进程池并行执行：既包含 bin2rawpulse 任务，也包含仅参数任务
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        # 提交所有任务，直接使用 bin2rawpulse 函数
-        future_to_task = {executor.submit(bin2rawpulse, *task): task for task in tasks}
+        future_to_desc = {}
+
+        # 提交 bin 解析任务
+        for run_filename, channel_list, event_number, save_path, ch0param_dir in tasks:
+            fut = executor.submit(
+                bin2rawpulse,
+                run_filename,
+                channel_list,
+                event_number,
+                save_path,
+                ch0param_dir,
+            )
+            future_to_desc[fut] = f'bin2rawpulse: {run_filename} (通道: {channel_list})'
+
+        # 提交仅参数任务
+        for output_file, channel_list, ch0param_dir in param_tasks:
+            fut = executor.submit(
+                compute_parameters_from_existing_h5,
+                output_file,
+                channel_list,
+                ch0param_dir,
+            )
+            future_to_desc[fut] = f'compute_parameters_from_existing_h5: {output_file} (通道: {channel_list})'
+
         # 收集结果
-        for future in as_completed(future_to_task):
-            task = future_to_task[future]
-            run_filename, channel_list, _, _, _ = task
+        for fut in as_completed(future_to_desc):
+            desc = future_to_desc[fut]
             try:
-                future.result()  # 如果成功，没有返回值也没有异常
+                fut.result()
                 success_count += 1
-                print(f'[成功 {success_count}] 成功处理: {run_filename} (通道: {channel_list})')
+                print(f'[成功 {success_count}] {desc}')
             except Exception as e:
                 fail_count += 1
-                print(f'[失败 {fail_count}] 处理文件 {run_filename} (通道: {channel_list}) 时出错: {e}')
-    
+                print(f'[失败 {fail_count}] {desc} 时出错: {e}')
+
     elapsed_time = time.time() - start_time
     print('=' * 60)
     print(f'所有任务处理完成！')
     print(f'总耗时: {elapsed_time:.2f} 秒 ({elapsed_time/60:.2f} 分钟)')
     print(f'成功: {success_count} 个任务')
     print(f'失败: {fail_count} 个任务')
-
 
 if __name__ == '__main__':
     main()

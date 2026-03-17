@@ -42,12 +42,10 @@ def _resolve_ch0_3_file(ch0_3_file: Optional[str]) -> str:
         raise FileNotFoundError("在 data/hdf5/raw_pulse/CH0-3 目录中未找到 h5 文件")
     return h5_files["CH0-3"][0]
 
-
 def _get_ch3_waveform(
     ch0_3_file: str,
     event_index: int,
-    channel_idx: int = 3,
-) -> np.ndarray:
+    channel_idx: int = 3,) -> np.ndarray:
     """从 HDF5 中读取指定事件的 CH3 波形。"""
     with h5py.File(ch0_3_file, "r") as f:
         channel_data = f["channel_data"]
@@ -62,12 +60,10 @@ def _get_ch3_waveform(
 
     return waveform
 
-
 def _get_waveform(
     ch0_3_file: str,
     event_index: int,
-    channel_idx: int,
-) -> np.ndarray:
+    channel_idx: int,) -> np.ndarray:
     """从 HDF5 中读取指定通道的指定事件波形（可用于 CH0 / CH3 等）。"""
     with h5py.File(ch0_3_file, "r") as f:
         channel_data = f["channel_data"]
@@ -82,11 +78,9 @@ def _get_waveform(
 
     return waveform
 
-
 def _compute_fft(
     waveform: np.ndarray,
-    sampling_interval_ns: float = 4.0,
-) -> tuple[np.ndarray, np.ndarray]:
+    sampling_interval_ns: float = 4.0,) -> tuple[np.ndarray, np.ndarray]:
     """
     对波形做加窗 FFT，返回频率坐标和幅度谱（归一化到最大值为 1，便于比较）。
 
@@ -122,20 +116,16 @@ def _compute_fft(
 
     return freq, amp
 
-
-def _compute_high_freq_energy_ratio(
+def _prepare_fft_window(
     waveform: np.ndarray,
     sampling_interval_ns: float = 4.0,
-    cutoff_mhz: float = 0.2,
-) -> float:
+) -> tuple[np.ndarray, np.ndarray]:
     """
-    计算频谱中高于 cutoff_mhz 的频率成分能量占比。
-
-    实现方式：
-    - 与 _compute_fft 保持一致的预处理（固定 120 µs 窗长、去直流、乘 Hann 窗）；
-    - 使用功率谱 |FFT|^2；
-    - 分子：freq >= cutoff_mhz 的功率和；
-    - 分母：剔除直流分量后的总功率和（freq > 0）。
+    公共 FFT 预处理步骤：
+        - 固定 120 µs 窗长度；
+        - 去直流；
+        - 乘 Hann 窗；
+        - 计算 rFFT，并返回 (freq, power)。
     """
     wf = waveform.astype(np.float64)
 
@@ -146,7 +136,7 @@ def _compute_high_freq_energy_ratio(
     wf = wf[:n_120]
 
     if wf.size == 0:
-        return 0.0
+        return np.array([]), np.array([])
 
     # 去直流
     wf = wf - np.mean(wf)
@@ -161,6 +151,25 @@ def _compute_high_freq_energy_ratio(
     freq = np.fft.rfftfreq(n, d=dt)
     fft_vals = np.fft.rfft(wf)
     power = np.abs(fft_vals) ** 2
+    return freq, power
+
+
+def _compute_high_freq_energy_ratio(
+    waveform: np.ndarray,
+    sampling_interval_ns: float = 4.0,
+    cutoff_mhz: float = 0.2,) -> float:
+    """
+    计算频谱中高于 cutoff_mhz 的频率成分能量占比。
+
+    实现方式：
+    - 与 _compute_fft 保持一致的预处理（固定 120 µs 窗长、去直流、乘 Hann 窗）；
+    - 使用功率谱 |FFT|^2；
+    - 分子：freq >= cutoff_mhz 的功率和；
+    - 分母：剔除直流分量后的总功率和（freq > 0）。
+    """
+    freq, power = _prepare_fft_window(
+        waveform, sampling_interval_ns=sampling_interval_ns
+    )
 
     if power.size == 0:
         return 0.0
@@ -179,14 +188,38 @@ def _compute_high_freq_energy_ratio(
     return high_power / total_power_non_dc
 
 
+def _compute_spectral_centroid(
+    waveform: np.ndarray,
+    sampling_interval_ns: float = 4.0,
+) -> float:
+    """
+    计算频谱质心（spectral centroid），反映功率谱在频域上的“重心”频率。
+    返回值单位为 MHz。
+    """
+    freq, power = _prepare_fft_window(
+        waveform, sampling_interval_ns=sampling_interval_ns
+    )
+
+    if power.size == 0:
+        return 0.0
+    # 排除直流分量，只在 freq > 0 上计算质心
+    non_dc_mask = freq > 0.0
+    freq_non_dc = freq[non_dc_mask]
+    power_non_dc = power[non_dc_mask]
+
+    total_power = float(np.sum(power_non_dc))
+    if total_power <= 0.0:
+        return 0.0
+    centroid_hz = float(np.sum(freq_non_dc * power_non_dc) / total_power)
+    return centroid_hz * 1e-6  # 转为 MHz
+
 def analyze_fft_for_events(
     ch0_3_file: Optional[str] = None,
     event_indices: Sequence[int] = (5187, 5353),
     channel_idx: int = 3,
     sampling_interval_ns: float = 4.0,
     max_freq_mhz: Optional[float] = None,
-    show_plot: bool = True,
-) -> None:
+    show_plot: bool = True,) -> None:
     """
     对指定的一组事件（默认 5187 和 5353）在 CH3 上做 FFT，并进行频谱对比。
 
@@ -209,10 +242,14 @@ def analyze_fft_for_events(
         high_freq_ratio = _compute_high_freq_energy_ratio(
             wf, sampling_interval_ns=sampling_interval_ns, cutoff_mhz=0.2
         )
+        centroid_mhz = _compute_spectral_centroid(
+            wf, sampling_interval_ns=sampling_interval_ns
+        )
         print(
             f"Event #{ev}: 采样点数 = {wf.size}, "
             f"最小值 = {wf.min():.1f}, 最大值 = {wf.max():.1f}, "
-            f"freq > 0.2 MHz 能量占比 = {high_freq_ratio * 100:.3f}%"
+            f"freq > 0.2 MHz 能量占比 = {high_freq_ratio * 100:.3f}%, "
+            f"频谱质心 = {centroid_mhz:.3f} MHz"
         )
 
     # 计算 FFT（基于 CH3），并统计能量谱分布方差
@@ -230,8 +267,12 @@ def analyze_fft_for_events(
         else:
             var_power = 0.0
 
+        centroid_mhz_fft = _compute_spectral_centroid(
+            wf, sampling_interval_ns=sampling_interval_ns
+        )
         print(
-            f"Event #{ev}: CH3 频域能量谱分布方差 = {var_power:.6e}"
+            f"Event #{ev}: CH3 频域能量谱分布方差 = {var_power:.6e}, "
+            f"CH3 频谱质心 = {centroid_mhz_fft:.3f} MHz"
         )
 
     # 频率单位转为 MHz
@@ -338,7 +379,7 @@ if __name__ == "__main__":
     # 默认对 5187 号和 5353 号 CH3 事件做频域 FFT 对比
     analyze_fft_for_events(
         ch0_3_file=None,
-        event_indices=(136, 5353),
+        event_indices=(6286, 6638),
         channel_idx=3,
         sampling_interval_ns=4.0,
         max_freq_mhz=None,  # 如果只想看低频部分，可以改成例如 50.0

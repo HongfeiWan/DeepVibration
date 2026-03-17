@@ -22,7 +22,7 @@ def fit_single_line_in_range(
 ) -> Tuple[float, float]:
     """
     在区间 (x_min, x_max) 内，使用最小二乘法拟合一条直线 y = a * x + b。
-    第一次拟合后，剔除残差过大的“远点”，再做一次最小二乘拟合。
+    不再对残差进行二次筛选，范围内所有点一并参与拟合。
 
     参数
     ----
@@ -54,26 +54,8 @@ def fit_single_line_in_range(
     x_sel = x[mask_range]
     y_sel = y[mask_range]
 
-    # 第一次普通最小二乘线性拟合
+    # 在选定范围内做一次普通最小二乘线性拟合（不剔除“异常点”）
     a1, b1 = np.polyfit(x_sel, y_sel, deg=1)
-
-    # 计算残差，并按 3σ 规则剔除“太远”的点，然后再拟合一次
-    y_pred = a1 * x_sel + b1
-    residuals = y_sel - y_pred
-    sigma = residuals.std(ddof=1) if residuals.size > 1 else 0.0
-
-    if sigma > 0.0:
-        inlier_mask = np.abs(residuals) <= 3.0 * sigma
-        n_inliers = int(inlier_mask.sum())
-
-        # 只有在有足够多的内点、且确实剔除了部分点时才进行第二次拟合
-        if 2 <= n_inliers < x_sel.size:
-            x_in = x_sel[inlier_mask]
-            y_in = y_sel[inlier_mask]
-            a2, b2 = np.polyfit(x_in, y_in, deg=1)
-            return float(a2), float(b2)
-
-    # 若 sigma 为 0 或内点过少，则退回首次拟合结果
     return float(a1), float(b1)
 
 
@@ -214,20 +196,33 @@ if __name__ == "__main__":
         mask_range = (max_ch1 > 2000.0) & (max_ch1 < 14000.0)
         n_in_range = int(mask_range.sum())
 
-        # 调用函数完成：第一次拟合 -> 剔除远点 -> 第二次拟合
+        # 调用函数完成：在 2000 < x < 14000 范围内拟合一条直线（不剔除异常点）
         a, b = fit_single_line_in_range(max_ch1, max_ch2, x_min=2000.0, x_max=14000.0)
 
-        # 基于最终直线，在 2000 < x < 14000 范围内计算残差的标准差 σ
-        x_fit = max_ch1[mask_range]
-        y_fit = max_ch2[mask_range]
-        y_fit_pred = a * x_fit + b
-        residuals_final = y_fit - y_fit_pred
-        sigma_final = residuals_final.std(ddof=1) if residuals_final.size > 1 else 0.0
+        # 基于最终直线，在 2000 < x < 14000 范围内计算残差和整体 σ，
+        # 只用于评估拟合质量，不再用来剔除点进行二次拟合
+        x_fit_all = max_ch1[mask_range]
+        y_fit_all = max_ch2[mask_range]
+        y_fit_pred_all = a * x_fit_all + b
+        residuals_all = y_fit_all - y_fit_pred_all
+        sigma_all = residuals_all.std(ddof=1) if residuals_all.size > 1 else 0.0
+
+        if sigma_all > 0.0:
+            inlier_mask_final = np.abs(residuals_all) <= sigma_all
+            x_fit = x_fit_all[inlier_mask_final]
+            y_fit = y_fit_all[inlier_mask_final]
+            residuals_final = y_fit - (a * x_fit + b)
+            sigma_final = residuals_final.std(ddof=1) if residuals_final.size > 1 else 0.0
+        else:
+            x_fit = x_fit_all
+            y_fit = y_fit_all
+            sigma_final = sigma_all
 
         print("=" * 70)
         print("两步最小二乘拟合结果：")
         print(f"  最终拟合直线: y = {a:.6f} * x + {b:.3f}")
         print(f"  参与拟合的初始点数 (2000 < x < 14000): {n_in_range}")
+        print(f"  最终判定为“内点”的个数 (|residual| <= 1σ): {x_fit.size}")
         print(f"  最终残差标准差 σ (y 方向): {sigma_final:.3f}")
         print("=" * 70)
 
@@ -245,9 +240,9 @@ if __name__ == "__main__":
             label="All physical events",
         )
 
-        # 2000 < x < 14000 范围内的点（红色）
-        x_range = max_ch1[mask_range]
-        y_range = max_ch2[mask_range]
+        # 2000 < x < 14000 且位于 1σ 带内的点（红色）
+        x_range = x_fit
+        y_range = y_fit
         ax.scatter(
             x_range,
             y_range,

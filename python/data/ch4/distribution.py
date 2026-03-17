@@ -1,201 +1,158 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-CH4 通道信号最大值分布分析
-分析 data/hdf5/raw_pulse/CH4 目录中事件波形最大值的分布
+CH4 通道 max_ch4 参数分布分析
+
+从 data/hdf5/raw_pulse/CH4_parameters 目录中读取各子目录下同名 HDF5 文件，
+提取其中的 max_ch4 数组，汇总并绘制其分布。
 """
-import os
-import sys
-from typing import Optional, Tuple
+
+from pathlib import Path
+from typing import List, Optional
 
 import h5py
-import numpy as np
 import matplotlib.pyplot as plt
-
-# 添加路径以便导入 utils 模块
-current_dir = os.path.dirname(os.path.abspath(__file__))
-python_dir = os.path.dirname(os.path.dirname(current_dir))
-if python_dir not in sys.path:
-    sys.path.insert(0, python_dir)
-
-from utils.visualize import get_h5_files
+import numpy as np
 
 
-def analyze_ch4_max_distribution(
-    h5_file: Optional[str] = None,
-    channel_idx: int = 0,
-    bins: int = 100,
-    save_path: Optional[str] = None,
-    show_plot: bool = True,
-    figsize: Tuple[int, int] = (10, 6),
-    trigger_threshold: Optional[float] = None,
-    max_files: int = 20,
-) -> Tuple[np.ndarray, dict]:
+def _discover_ch4_parameters_dir_relative_to_script() -> Path:
     """
-    分析 CH4 文件中所有事件波形最大值的分布。
+    返回 CH4_parameters 目录的绝对路径。
 
-    参数:
-        h5_file: HDF5 文件路径，如果为 None 则自动获取 CH4 目录中的多个文件（最多 max_files 个）并合并分析
-        channel_idx: 通道索引（CH4 目录中通常只有通道 0）
-        bins: 直方图的 bins 数量
-        save_path: 保存图片的路径，如果为 None 则不保存
-        show_plot: 是否显示图片
-        figsize: 图片大小 (宽度, 高度)
-        trigger_threshold: 触发阈值（FADC），用于在图中画出竖线
-        max_files: 当 h5_file 为 None 时，最多自动选择的文件数
-
-    返回:
-        (max_values 数组, histogram 统计结果) 的元组
+    目录结构假定为：
+        project_root/
+          data/
+            hdf5/
+              raw_pulse/
+                CH4_parameters/
+          python/
+            data/
+              ch4/
+                distribution.py  (本脚本)
     """
-    # 如果没有指定文件，自动获取 CH4 目录中的多个文件（最多 max_files 个）
-    if h5_file is None:
-        h5_files = get_h5_files()
-        if "CH4" not in h5_files or not h5_files["CH4"]:
-            raise FileNotFoundError("在 data/hdf5/raw_pulse/CH4 目录中未找到 h5 文件")
-        all_files = h5_files["CH4"][:max_files]
-        if not all_files:
-            raise FileNotFoundError("在 data/hdf5/raw_pulse/CH4 目录中未找到可用的 h5 文件")
-        print(f"自动选择 {len(all_files)} 个文件 (最多 {max_files} 个):")
-        for fp in all_files:
-            print(f"  - {os.path.basename(fp)}")
-    else:
-        if not os.path.exists(h5_file):
-            raise FileNotFoundError(f"文件不存在: {h5_file}")
-        all_files = [h5_file]
-        print("使用指定文件进行分析:")
-        print(f"  - {os.path.basename(h5_file)}")
+    script_dir = Path(__file__).resolve().parent        # .../python/data/ch4
+    python_dir = script_dir.parent.parent               # .../python
+    project_root = python_dir.parent                    # 项目根
+    ch4_parameters_dir = project_root / "data" / "hdf5" / "raw_pulse" / "CH4_parameters"
+    return ch4_parameters_dir
 
+
+def _list_h5_files(folder: Path) -> List[Path]:
+    """
+    根据 CH4_parameters 目录下的子文件夹名查找对应的 HDF5 文件。
+
+    约定：
+    - CH4_parameters/
+        run001/
+            run001.h5   或 run001.hdf5
+        run002/
+            run002.h5   或 run002.hdf5
+    若按文件夹名精确匹配的文件不存在，则回退为该子目录中找到的第一
+    个 .h5 / .hdf5 文件。
+    """
+    if not folder.exists():
+        raise FileNotFoundError(f"源目录不存在: {folder}")
+    files: List[Path] = []
+    for entry in sorted(folder.iterdir()):
+        if entry.is_dir():
+            dirname = entry.name
+            # 优先尝试与文件夹同名的 .h5 / .hdf5
+            candidates = [
+                entry / f"{dirname}.h5",
+                entry / f"{dirname}.hdf5",
+            ]
+            target: Optional[Path] = None
+            for c in candidates:
+                if c.exists():
+                    target = c
+                    break
+            # 若没有严格同名文件，则在该目录下找第一个 .h5 / .hdf5
+            if target is None:
+                for child in sorted(entry.iterdir()):
+                    if child.is_file() and child.name.lower().endswith((".h5", ".hdf5")):
+                        target = child
+                        break
+            if target is not None:
+                files.append(target)
+        elif entry.is_file() and entry.name.lower().endswith((".h5", ".hdf5")):
+            # 允许 CH4_parameters 根目录下直接放部分 HDF5 文件
+            files.append(entry)
+    files.sort()
+    return files
+
+
+def _read_max_ch4_from_file(path: Path) -> np.ndarray:
+    """
+    从单个 CH4_parameters 文件读取 max_ch4 数组。
+    若格式不符合预期，则返回长度为 0 的数组。
+    """
     try:
-        all_max_values = []
-        total_events = 0
-        total_files = len(all_files)
-
-        for idx, file_path in enumerate(all_files, start=1):
-            print("=" * 70)
-            print(f"[{idx}/{total_files}] 分析文件: {os.path.basename(file_path)}")
-            print(f"文件路径: {file_path}")
-            print("=" * 70)
-
-            with h5py.File(file_path, "r") as f:
-                if "channel_data" not in f:
-                    raise KeyError("文件中没有找到 channel_data 数据集")
-
-                channel_data = f["channel_data"]
-                time_samples, num_channels, num_events = channel_data.shape
-
-                print(f"\n数据维度: (时间采样点数={time_samples}, 通道数={num_channels}, 事件数={num_events})")
-
-                if channel_idx < 0 or channel_idx >= num_channels:
-                    raise IndexError(f"通道索引 {channel_idx} 超出范围 [0, {num_channels-1}]")
-
-                # 提取所有事件的波形最大值
-                print("\n正在计算所有事件的最大值...")
-                file_max_values = np.zeros(num_events, dtype=np.float64)
-
-                batch_size = 1000
-                for i in range(0, num_events, batch_size):
-                    end_idx = min(i + batch_size, num_events)
-                    batch_data = channel_data[:, channel_idx, i:end_idx]
-                    batch_max = np.max(batch_data, axis=0)
-                    file_max_values[i:end_idx] = batch_max
-                    if (i // batch_size + 1) % 10 == 0 or end_idx == num_events:
-                        print(f"  已处理 {end_idx}/{num_events} 个事件 ({end_idx/num_events*100:.1f}%)")
-
-                all_max_values.append(file_max_values)
-                total_events += num_events
-
-        if not all_max_values:
-            raise RuntimeError("没有从任何文件中读取到最大值数据。")
-
-        max_values = np.concatenate(all_max_values)
-
-        print("\n汇总统计信息:")
-        print(f"  文件数: {total_files}")
-        print(f"  总事件数: {total_events}")
-        print(f"  最大值范围: [{np.min(max_values):.2f}, {np.max(max_values):.2f}]")
-        print(f"  平均值: {np.mean(max_values):.2f}")
-        print(f"  中位数: {np.median(max_values):.2f}")
-        print(f"  标准差: {np.std(max_values):.2f}")
-
-        fig, ax = plt.subplots(figsize=figsize)
-        n, bins_edges, patches = ax.hist(max_values, bins=bins, edgecolor="black", alpha=0.7)
-
-        if trigger_threshold is not None:
-            ax.axvline(
-                trigger_threshold,
-                color="red",
-                linestyle="--",
-                linewidth=2,
-                label=f"Trigger = {trigger_threshold:.0f} FADC",
-            )
-
-        mean_val = np.mean(max_values)
-        median_val = np.median(max_values)
-        std_val = np.std(max_values)
-
-        stats_text = (
-            f"Total Events: {total_events}\n"
-            f"Mean: {mean_val:.2f}\n"
-            f"Median: {median_val:.2f}\n"
-            f"Std: {std_val:.2f}\n"
-            f"Min: {np.min(max_values):.2f}\n"
-            f"Max: {np.max(max_values):.2f}"
-        )
-
-        ax.text(
-            0.02,
-            0.98,
-            stats_text,
-            transform=ax.transAxes,
-            verticalalignment="top",
-            bbox=dict(boxstyle="round", facecolor="wheat", alpha=0.8),
-            fontsize=10,
-        )
-
-        ax.set_xlabel("Maximum Amplitude (ADC counts)", fontsize=12)
-        ax.set_ylabel("Number of Events", fontsize=12)
-        if trigger_threshold is not None:
-            ax.legend()
-        ax.grid(True, alpha=0.3)
-        plt.tight_layout()
-
-        if save_path:
-            plt.savefig(save_path, dpi=150, bbox_inches="tight")
-            print(f"\n图片已保存至: {save_path}")
-
-        if show_plot:
-            plt.show()
-        else:
-            plt.close()
-
-        hist_stats = {
-            "counts": n,
-            "bins": bins_edges,
-            "mean": mean_val,
-            "median": median_val,
-            "std": std_val,
-            "min": np.min(max_values),
-            "max": np.max(max_values),
-        }
-
-        return max_values, hist_stats
-
+        with h5py.File(path, "r") as f:
+            if "max_ch4" not in f:
+                print(f"[警告] {path.name}: 缺少数据集 'max_ch4'，跳过。")
+                return np.empty((0,), dtype=np.float64)
+            dset = f["max_ch4"]
+            if dset.ndim != 1:
+                print(
+                    f"[警告] {path.name}: 'max_ch4' 维度不是 1, shape={dset.shape}，跳过。"
+                )
+                return np.empty((0,), dtype=np.float64)
+            data = np.asarray(dset[...], dtype=np.float64)
+            return data
     except Exception as e:
-        print(f"分析过程中出错: {e}")
-        raise
+        print(f"[错误] 读取 {path} 时失败: {e}")
+        return np.empty((0,), dtype=np.float64)
+
+
+def main(bins: int = 100, trigger_threshold: Optional[float] = 7060.0) -> None:
+    """
+    读取 CH4_parameters 目录下所有 HDF5 文件中的 max_ch4，
+    汇总并绘制分布直方图。
+    """
+    ch4_parameters_dir = _discover_ch4_parameters_dir_relative_to_script()
+    print(f"CH4_parameters 目录: {ch4_parameters_dir}")
+
+    files = _list_h5_files(ch4_parameters_dir)
+    if not files:
+        print("未在 CH4_parameters 目录中找到任何 HDF5 文件。")
+        return
+
+    all_values: List[np.ndarray] = []
+    for path in files:
+        data = _read_max_ch4_from_file(path)
+        if data.size > 0:
+            all_values.append(data)
+
+    if not all_values:
+        print("未从任何 CH4_parameters 文件中读取到 max_ch4 数据。")
+        return
+
+    max_values = np.concatenate(all_values)
+    print(f"总事件数: {max_values.size}")
+    print(f"max_ch4 范围: min={max_values.min():.2f}, max={max_values.max():.2f}")
+
+    plt.rcParams.update({"font.family": "serif", "font.serif": ["Times New Roman"]})
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.hist(max_values, bins=bins, edgecolor="black", alpha=0.7)
+
+    # 触发阈值红色虚线
+    if trigger_threshold is not None:
+        ax.axvline(
+            trigger_threshold,
+            color="red",
+            linestyle="--",
+            linewidth=2,
+            label=f"Trigger = {trigger_threshold:.0f} FADC",
+        )
+        ax.legend()
+
+    ax.set_xlabel("max_ch4", fontsize=12)
+    ax.set_ylabel("Count", fontsize=12)
+    ax.set_title(f"Distribution of max_ch4 (N={max_values.size})", fontsize=13)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    plt.show()
 
 
 if __name__ == "__main__":
-    print("=" * 70)
-    print("分析 CH4 单个文件")
-    print("=" * 70)
-    try:
-        max_values, stats = analyze_ch4_max_distribution(
-            h5_file=None,  # 自动选择 CH4 目录中的第一个文件
-            bins=1000,
-            show_plot=True,
-            trigger_threshold=7060,
-        )
-        print(f"\n分析完成！总事件数: {stats['counts'].sum()}")
-    except Exception as e:
-        print(f"分析失败: {e}")
+    main(bins=500, trigger_threshold=7060.0)

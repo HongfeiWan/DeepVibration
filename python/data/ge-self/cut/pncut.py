@@ -292,167 +292,171 @@ __all__ = [
 
 if __name__ == "__main__":
     """
-    测试函数：绘制 max CH1 与 max CH2 的图形，并应用 PNcut。
+    测试函数：直接从 CH0_parameters / CH1_parameters 中读取 max_ch0 / max_ch1，
+    绘制 PNcut 前的 max CH0 vs max CH1 散点图。
     """
     import os
     import sys
     import h5py
     import matplotlib.pyplot as plt
 
-    # 添加路径以便导入 utils 模块
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    python_dir = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
-    if python_dir not in sys.path:
-        sys.path.insert(0, python_dir)
-
-    from utils.visualize import get_h5_files
-
     print("=" * 70)
-    print("PNcut 测试：绘制 max CH1 vs max CH2 图形")
+    print("PNcut 测试：从参数文件绘制 max CH0 vs max CH1 图形")
     print("=" * 70)
 
     try:
-        # 1. 自动获取文件并筛选物理事例（既非RT也非Inhibit）
-        print("\n正在筛选物理事例（既非RT也非Inhibit）...")
-        
-        # 获取文件
-        h5_files = get_h5_files()
-        if "CH0-3" not in h5_files or not h5_files["CH0-3"]:
-            raise FileNotFoundError("在 data/hdf5/raw_pulse/CH0-3 目录中未找到 h5 文件")
-        if "CH5" not in h5_files or not h5_files["CH5"]:
-            raise FileNotFoundError("在 data/hdf5/raw_pulse/CH5 目录中未找到 h5 文件")
-        
-        # 查找匹配的文件对
-        ch0_3_files = h5_files["CH0-3"]
-        ch5_files = h5_files["CH5"]
-        ch0_3_dict = {os.path.basename(f): f for f in ch0_3_files}
-        ch5_dict = {os.path.basename(f): f for f in ch5_files}
-        
-        matched = False
-        ch0_3_file = None
-        ch5_file = None
-        for filename in ch0_3_dict.keys():
-            if filename in ch5_dict:
-                ch0_3_file = ch0_3_dict[filename]
-                ch5_file = ch5_dict[filename]
-                matched = True
-                break
-        
-        if not matched:
-            raise ValueError("未找到匹配的CH0-3和CH5文件对")
-        
-        print(f"使用文件: {os.path.basename(ch0_3_file)}")
-        
-        # 筛选物理事例
-        rt_cut = 6000.0
-        batch_size = 1000
-        
-        with h5py.File(ch0_3_file, "r") as f_ch0:
-            ch0_channel_data = f_ch0["channel_data"]
-            ch0_time_samples, ch0_num_channels, ch0_num_events = ch0_channel_data.shape
-            ch0_min_values = np.zeros(ch0_num_events, dtype=np.float64)
-            for i in range(0, ch0_num_events, batch_size):
-                end_idx = min(i + batch_size, ch0_num_events)
-                batch_data = ch0_channel_data[:, 0, i:end_idx]
-                ch0_min_values[i:end_idx] = np.min(batch_data, axis=0)
-        
-        with h5py.File(ch5_file, "r") as f_ch5:
-            ch5_channel_data = f_ch5["channel_data"]
-            ch5_time_samples, ch5_num_channels, ch5_num_events = ch5_channel_data.shape
-            ch5_max_values = np.zeros(ch5_num_events, dtype=np.float64)
-            for i in range(0, ch5_num_events, batch_size):
-                end_idx = min(i + batch_size, ch5_num_events)
-                batch_data = ch5_channel_data[:, 0, i:end_idx]
-                ch5_max_values[i:end_idx] = np.max(batch_data, axis=0)
-            
-            # 判断信号类型
-            rt_mask = ch5_max_values > rt_cut
-            inhibit_mask = ch0_min_values == 0
-            neither_mask = ~rt_mask & ~inhibit_mask
-            selected_indices = np.where(neither_mask)[0]
-        
-        physical_count = len(selected_indices)
+        # 推断项目根目录：.../python/data/ge-self/cut/pncut.py -> .../DeepVibration
+        current_dir = os.path.dirname(os.path.abspath(__file__))      # .../cut
+        ge_self_dir = os.path.dirname(current_dir)                    # .../ge-self
+        data_dir = os.path.dirname(ge_self_dir)                       # .../data
+        python_dir = os.path.dirname(data_dir)                        # .../python
+        project_root = os.path.dirname(python_dir)                    # .../DeepVibration
 
-        if physical_count == 0:
-            print("未发现物理事例，无法进行测试")
-            sys.exit(1)
+        ch0_param_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH0_parameters")
+        ch1_param_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH1_parameters")
 
-        print(f"找到 {physical_count} 个物理事例")
+        if not os.path.isdir(ch0_param_dir):
+            raise FileNotFoundError(f"CH0_parameters 目录不存在: {ch0_param_dir}")
+        if not os.path.isdir(ch1_param_dir):
+            raise FileNotFoundError(f"CH1_parameters 目录不存在: {ch1_param_dir}")
 
-        # 2. 读取物理事例的波形数据
-        print("\n正在读取波形数据...")
-        batch_size = 1000
-        waveforms_list = []
+        # 基于文件名在 CH0/CH1 参数目录中匹配 run
+        ch0_files = sorted(
+            name for name in os.listdir(ch0_param_dir)
+            if name.lower().endswith((".h5", ".hdf5"))
+        )
+        if not ch0_files:
+            raise FileNotFoundError(f"在 {ch0_param_dir} 中未找到任何 h5 参数文件")
 
-        with h5py.File(ch0_3_file, "r") as f:
-            channel_data = f["channel_data"]
-            time_samples, num_channels, total_events = channel_data.shape
+        ch1_existing = {
+            name for name in os.listdir(ch1_param_dir)
+            if name.lower().endswith((".h5", ".hdf5"))
+        }
 
-            # 确保有 CH1 和 CH2（索引 1 和 2）
-            if num_channels < 3:
-                raise ValueError(f"文件只有 {num_channels} 个通道，需要至少 3 个通道（CH0, CH1, CH2）")
+        all_max_ch0 = []
+        all_max_ch1 = []
+        n_runs_used = 0
 
-            # 批量读取选中的物理事例
-            for i in range(0, len(selected_indices), batch_size):
-                end_idx = min(i + batch_size, len(selected_indices))
-                batch_indices = selected_indices[i:end_idx]
-                batch_waveforms = channel_data[:, :, batch_indices]  # (time_samples, n_channels, batch_size)
-                waveforms_list.append(batch_waveforms)
-                if (i // batch_size + 1) % 10 == 0 or end_idx == len(selected_indices):
-                    print(f"  已读取 {end_idx}/{len(selected_indices)} 个事件")
+        for name in ch0_files:
+            if name not in ch1_existing:
+                continue
 
-        # 合并所有批次
-        phys_waveforms = np.concatenate(waveforms_list, axis=2)  # (time_samples, n_channels, n_events)
-        print(f"波形数据形状: {phys_waveforms.shape}")
+            ch0_path = os.path.join(ch0_param_dir, name)
+            ch1_path = os.path.join(ch1_param_dir, name)
 
-        # 3. 计算 CH1 和 CH2 的最大值
-        print("\n正在计算 CH1 和 CH2 的最大值...")
-        max_ch1 = _compute_max_in_window(phys_waveforms, ch_idx=1, max_window=None)
-        max_ch2 = _compute_max_in_window(phys_waveforms, ch_idx=2, max_window=None)
+            with h5py.File(ch0_path, "r") as f_ch0, h5py.File(ch1_path, "r") as f_ch1:
+                if "max_ch0" not in f_ch0 or "max_ch1" not in f_ch1:
+                    print(f"[警告] {name} 中缺少 max_ch0 或 max_ch1，跳过该 run。")
+                    continue
 
-        # 4. 绘制 max CH1 vs max CH2 散点图
-        print("\n正在绘制图形...")
+                max_ch0 = np.asarray(f_ch0["max_ch0"][...], dtype=np.float64)
+                max_ch1 = np.asarray(f_ch1["max_ch1"][...], dtype=np.float64)
+
+                if max_ch0.ndim != 1 or max_ch1.ndim != 1:
+                    print(f"[警告] {name} 中 max_ch0/max_ch1 不是一维数组，跳过该 run。")
+                    continue
+
+                n0, n1 = max_ch0.shape[0], max_ch1.shape[0]
+                n = min(n0, n1)
+                if n0 != n1:
+                    print(
+                        f"[警告] {name} 中 CH0/CH1 事件数不一致 ({n0} vs {n1})，"
+                        f"仅使用前 {n} 个事件。"
+                    )
+                    max_ch0 = max_ch0[:n]
+                    max_ch1 = max_ch1[:n]
+
+            all_max_ch0.append(max_ch0)
+            all_max_ch1.append(max_ch1)
+            n_runs_used += 1
+            print(f"[读取] {name} | 事件数: {n}")
+
+        if not all_max_ch0:
+            raise RuntimeError("未能从任何 run 中收集到 max_ch0/max_ch1，无法绘图。")
+
+        max_ch0_all = np.concatenate(all_max_ch0)
+        max_ch1_all = np.concatenate(all_max_ch1)
+
+        print("=" * 70)
+        print(f"总共使用 {n_runs_used} 个 run，汇总事件数: {max_ch0_all.size}")
+
+        # 在指定范围内做快速线性拟合：
+        #   6000 <= CH0max <= 12000 且 CH1max > 3000
+        print("\n在 6000 <= CH0max <= 12000 且 CH1max > 3000 条件下进行快速线性拟合...")
+        mask_fit = (
+            (max_ch0_all >= 6000.0) & (max_ch0_all <= 12000.0) &
+            (max_ch1_all > 3000.0)
+        )
+        x_fit = max_ch0_all[mask_fit]
+        y_fit = max_ch1_all[mask_fit]
+        n_fit = x_fit.size
+        if n_fit < 2:
+            raise RuntimeError(
+                f"满足拟合条件的点数不足 2 个 (n_fit={n_fit})，无法进行线性拟合。"
+            )
+
+        # 使用 numpy.polyfit 做普通最小二乘直线拟合。
+        # 该操作内部使用向量化/BLAS，已能较好利用 CPU 资源。
+        a, b = np.polyfit(x_fit, y_fit, deg=1)
+
+        # 在拟合点上计算残差的标准差 σ，用于构建平行于直线的 ±σ 带
+        y_fit_pred = a * x_fit + b
+        residuals = y_fit - y_fit_pred
+        sigma = residuals.std(ddof=1) if residuals.size > 1 else 0.0
+
+        print(f"线性拟合结果（在筛选条件下）: CH1max ≈ {a:.6f} * CH0max + {b:.3f}")
+        print(f"参与拟合点数: {n_fit}")
+        print(f"残差标准差 σ（沿 y 方向）: {sigma:.3f}")
+
+        # 如散点数过多，随机下采样到可快速显示的数量（例如 200k）用于绘图
+        max_points = 200_000
+        n_total = max_ch0_all.size
+        if n_total > max_points:
+            print(f"散点数量 {n_total} 过多，随机下采样到 {max_points} 个点用于绘图。")
+            rng = np.random.default_rng(42)
+            idx_sub = rng.choice(n_total, size=max_points, replace=False)
+            x_plot = max_ch0_all[idx_sub]
+            y_plot = max_ch1_all[idx_sub]
+        else:
+            x_plot = max_ch0_all
+            y_plot = max_ch1_all
+
+        # 1. 绘制全局 max CH0 vs max CH1 散点图，并叠加拟合直线
+        print("\n正在绘制全局图形...")
         fig, ax = plt.subplots(1, 1, figsize=(10, 6))
 
-        scatter = ax.scatter(
-            max_ch1, max_ch2, s=3, alpha=0.4, c="blue", label="Physical Events"
+        ax.scatter(
+            x_plot, y_plot,
+            s=3, alpha=0.4, c="blue", edgecolors="none",
+            label="Events (from parameters)",
         )
+
+        # 在全局 x 范围上画出拟合直线及其平行的 ±σ 带
+        x_line = np.linspace(x_plot.min(), x_plot.max(), 200)
+        y_line = a * x_line + b
+        ax.plot(x_line, y_line, "r-", lw=2, alpha=0.8, label="Linear fit (range-filtered)")
+
+        if sigma > 0.0:
+            y_upper = y_line + 2*sigma
+            y_lower = y_line - 2*sigma
+            ax.fill_between(
+                x_line,
+                y_lower,
+                y_upper,
+                color="red",
+                alpha=0.15,
+                label="±2σ band (parallel to line)",
+            )
 
         ax.set_xlabel("CH0 Max (ADC counts)", fontsize=12)
         ax.set_ylabel("CH1 Max (ADC counts)", fontsize=12)
-        ax.set_title(f"CH0 Max vs CH1 Max\nTotal: {len(max_ch1)} events", fontsize=11)
-        ax.legend(fontsize=9)
+        ax.set_title(f"CH0 Max vs CH1 Max\nTotal: {len(max_ch0_all)} events", fontsize=11)
+        ax.legend(loc="upper left", fontsize=9)
         ax.grid(True, alpha=0.3)
 
         plt.tight_layout()
         plt.show()
 
-        # 5. 绘制第二幅图：1000-2000 x,y 范围的局部放大图
-        print("\n正在绘制第二幅图（1000-2000 x,y 范围）...")
-        
-        # 筛选在 1000-2000 范围内的点
-        mask_range = (max_ch1 >= 1000) & (max_ch1 <= 2000) & (max_ch2 >= 1000) & (max_ch2 <= 2000)
-        max_ch1_filtered = max_ch1[mask_range]
-        max_ch2_filtered = max_ch2[mask_range]
-        
-        fig2, ax2 = plt.subplots(1, 1, figsize=(10, 6))
-        
-        scatter2 = ax2.scatter(
-            max_ch1_filtered, max_ch2_filtered, s=3, alpha=0.4, c="blue", label="Physical Events (1000-2000 range)"
-        )
-        
-        ax2.set_xlabel("CH0 Max (ADC counts)", fontsize=12)
-        ax2.set_ylabel("CH1 Max (ADC counts)", fontsize=12)
-        ax2.set_title(f"CH0 Max vs CH1 Max (1000-2000 range)\nTotal: {len(max_ch1_filtered)} events", fontsize=11)
-        ax2.set_xlim(1000, 2000)
-        ax2.set_ylim(1000, 2000)
-        ax2.legend(fontsize=9)
-        ax2.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        plt.show()
-
-        print("\n测试完成！两幅图形已显示。")
 
     except Exception as e:
         print(f"\n测试过程中出错: {e}")

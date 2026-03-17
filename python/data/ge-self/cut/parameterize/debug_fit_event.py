@@ -13,31 +13,35 @@ from typing import Optional
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit
 
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 cut_dir = os.path.dirname(current_dir)
 sampling_interval_ns = 4.0
 
+# 与正式快放拟合保持一致的实现
+ge_self_dir = os.path.dirname(cut_dir)
+data_dir = os.path.dirname(ge_self_dir)
+python_dir = os.path.dirname(data_dir)
+if python_dir not in sys.path:
+    sys.path.insert(0, python_dir)
+from utils.fit import (  # type: ignore  # noqa: E402
+    _compute_fast_fit_params,
+    _tanh_rise,
+    _smooth_waveform_for_fast_fit,
+)
+
 
 def _resolve_ch0_3_file(ch0_3_file: Optional[str]) -> str:
     if ch0_3_file is not None:
         return ch0_3_file
-    ge_self_dir = os.path.dirname(cut_dir)
-    data_dir = os.path.dirname(ge_self_dir)
-    python_dir = os.path.dirname(data_dir)
     if python_dir not in sys.path:
         sys.path.insert(0, python_dir)
     from utils.visualize import get_h5_files
     h5_files = get_h5_files()
     if "CH0-3" not in h5_files or not h5_files["CH0-3"]:
-        raise FileNotFoundError("在 data/hdf5/raw_pulse/CH0-3 目录中未找到 h5 文件")
+        raise FileNotFoundError("No HDF5 file found in data/hdf5/raw_pulse/CH0-3")
     return h5_files["CH0-3"][0]
-
-
-def _tanh_rise(x, p0, p1, p2, p3):
-    return 0.5 * p0 * np.tanh(p1 * (x - p2)) + p3
 
 
 def debug_fit_event(
@@ -69,15 +73,10 @@ def debug_fit_event(
         waveform = channel_data[:, channel_idx, event_index].astype(np.float64)
 
     time_axis_us = np.arange(time_samples) * sampling_interval_ns / 1000.0
-    waveform_smooth = waveform.copy()
-
-    # # 平滑
-    # if smooth_window is not None and smooth_window > 1 and waveform.size >= smooth_window:
-    #     half = smooth_window // 2
-    #     for _ in range(max(1, smooth_times)):
-    #         tmp = waveform_smooth.copy()
-    #         for i in range(half, waveform.size - half):
-    #             waveform_smooth[i] = float(np.mean(tmp[i - half : i + half + 1]))
+    # 使用与 utils.fit 中相同的平滑方式（只是为了可视化更接近正式拟合）
+    waveform_smooth = _smooth_waveform_for_fast_fit(
+        waveform, smooth_window=smooth_window, smooth_times=smooth_times
+    )
 
     print("--- 1. 波形概览 ---")
     print(f"波形范围: min={np.min(waveform_smooth):.1f}, max={np.max(waveform_smooth):.1f}")
@@ -118,80 +117,39 @@ def debug_fit_event(
         print("  [警告] 峰值在末尾 5% 内，可能是截断或慢上升")
     print()
 
-    x_data = time_axis_us[mask]
-    y_data = waveform_smooth[mask]
+    # 使用 utils.fit 中的统一快放拟合函数
+    print("--- 4. 使用 utils.fit._compute_fast_fit_params 拟合 ---")
+    params = _compute_fast_fit_params(
+        waveform,
+        sampling_interval_ns=sampling_interval_ns,
+        baseline_window_us=baseline_window_us,
+    )
+    print(
+        "tanh 参数: "
+        f"p0={params['tanh_p0']:.4f}, "
+        f"p1={params['tanh_p1']:.4f}, "
+        f"p2={params['tanh_p2']:.4f}, "
+        f"p3={params['tanh_p3']:.4f}"
+    )
+    print(f"tanh_rms = {params['tanh_rms']:.6g}")
 
-    p0_init, p3_init = max_amp, baseline_front
-    mid_level = 0.5 * max_amp
-    idx_mid = int(np.argmax(amp >= mid_level))
-    p2_init = float(time_axis_us[idx_mid]) if amp[idx_mid] >= mid_level else float(np.mean(x_data))
-    level_5, level_95 = 0.05 * max_amp, 0.95 * max_amp
-    idx_5, idx_95 = np.argmax(amp >= level_5), np.argmax(amp >= level_95)
-    if amp[idx_5] >= level_5 and amp[idx_95] >= level_95 and idx_95 > idx_5:
-        rise_time = max(float(time_axis_us[idx_95] - time_axis_us[idx_5]), 1e-6)
-        p1_init = np.log(19.0) / rise_time
-        print("--- 4. 初值（指定区间）---")
-        print(f"p0_init = {p0_init:.2f}, p1_init = {p1_init:.4f}, p2_init = {p2_init:.3f}, p3_init = {p3_init:.2f}")
-        print(f"rise_time (5%~95%) = {rise_time:.4f} µs")
-    else:
-        p1_init = 1.0 / (x_data[-1] - x_data[0] + 1e-6)
-        print("--- 4. 初值（指定区间，退化）---")
-        print(f"idx_5={idx_5}, idx_95={idx_95}, amp[idx_5]={amp[idx_5]:.2f}, amp[idx_95]={amp[idx_95]:.2f}")
-        print(f"5%~95% 约束不满足，使用 p1_init = 1/时间跨度 = {p1_init:.6f}")
-        print(f"p0_init={p0_init:.2f}, p1_init={p1_init:.6f}, p2_init={p2_init:.3f}, p3_init={p3_init:.2f}")
-    print()
-
-    # 第一次拟合：指定区间
+    abnormal_value = 1e6
     fit_curve = None
-    popt = None
-
-    print("--- 5. 第一次拟合（指定区间 0 ~ idx_max+2000）---")
-    try:
-        popt, pcov = curve_fit(
-            _tanh_rise, x_data, y_data,
-            p0=[p0_init, p1_init, p2_init, p3_init],
-            maxfev=10000,
+    if params["tanh_rms"] < abnormal_value:
+        fit_curve = _tanh_rise(
+            time_axis_us,
+            params["tanh_p0"],
+            params["tanh_p1"],
+            params["tanh_p2"],
+            params["tanh_p3"],
         )
-        fit_curve = _tanh_rise(time_axis_us, *popt)
-        print("  成功!")
-        print(f"  popt = p0={popt[0]:.4f}, p1={popt[1]:.4f}, p2={popt[2]:.4f}, p3={popt[3]:.4f}")
-    except Exception as e:
-        print(f"  失败: {type(e).__name__}: {e}")
-        import traceback
-        traceback.print_exc()
-        print()
-
-        # 第二次拟合：全部点
-        print("--- 6. 第二次拟合（全部点，无约束）---")
-        x_data_full = time_axis_us
-        y_data_full = waveform_smooth
-        time_span = float(x_data_full[-1] - x_data_full[0]) + 1e-6
-        p0_fb = float(np.max(y_data_full) - np.min(y_data_full))
-        p3_fb = float(np.min(y_data_full))
-        p2_fb = float(np.mean(x_data_full))
-        p1_fb = 1.0 / time_span
-        print(f"初值: p0={p0_fb:.2f}, p1={p1_fb:.6f}, p2={p2_fb:.3f}, p3={p3_fb:.2f}")
-        # 全点拟合不易收敛：提高迭代上限，并加宽松边界避免发散
-        bounds_low = [1e-6, 1e-6, float(x_data_full[0]) - 100, -np.inf]
-        bounds_high = [np.inf, 1e2, float(x_data_full[-1]) + 100, np.inf]
-        try:
-            popt, pcov = curve_fit(
-                _tanh_rise, x_data_full, y_data_full,
-                p0=[p0_fb, p1_fb, p2_fb, p3_fb],
-                bounds=(bounds_low, bounds_high),
-                maxfev=100000,
-            )
-            fit_curve = _tanh_rise(time_axis_us, *popt)
-            print("  成功!")
-            print(f"  popt = p0={popt[0]:.4f}, p1={popt[1]:.4f}, p2={popt[2]:.4f}, p3={popt[3]:.4f}")
-        except Exception as e2:
-            print(f"  失败: {type(e2).__name__}: {e2}")
-            import traceback
-            traceback.print_exc()
+        print("拟合状态: 成功")
+    else:
+        print("拟合状态: 失败（命中异常值阈值）")
 
     # 绘图
     print()
-    print("--- 7. 绘图 ---")
+    print("--- 5. 绘图 ---")
     global_min = float(np.min(waveform_smooth))
     global_max = float(np.max(waveform_smooth))
     data_range = global_max - global_min
@@ -210,8 +168,8 @@ def debug_fit_event(
     if fit_curve is not None:
         ax.plot(time_axis_us, fit_curve, "r--", lw=2, label="tanh fit")
 
-    # 标出拟合区间与峰值位置
-    ax.axvspan(time_axis_us[0], time_axis_us[idx_end], alpha=0.1, color="green", label="拟合区间")
+    # Mark fitting range and peak position
+    ax.axvspan(time_axis_us[0], time_axis_us[idx_end], alpha=0.1, color="green", label="Fit range")
     ax.axvline(t_max, color="gray", ls=":", alpha=0.7, label=f"t_max @ idx={idx_max}")
 
     ax.set_xlabel("Time (µs)", fontsize=12)
@@ -219,7 +177,10 @@ def debug_fit_event(
     ax.set_ylim(y_min, y_max)
     ax.grid(True, alpha=0.3)
     ax.legend()
-    ax.set_title(f"Event #{event_index}  tanh 拟合调试  " + ("成功" if fit_curve is not None else "失败"), fontsize=12)
+    ax.set_title(
+        f"Event #{event_index}  tanh fit debug  " + ("SUCCESS" if fit_curve is not None else "FAIL"),
+        fontsize=12,
+    )
     fig.tight_layout()
     plt.show()
 
@@ -227,7 +188,7 @@ def debug_fit_event(
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="调试指定 event 的 tanh 拟合")
-    parser.add_argument("-e", "--event", type=int, default=2647, help="event 索引")
+    parser.add_argument("-e", "--event", type=int, default=5716, help="event 索引")
     parser.add_argument("-f", "--file", type=str, default=None, help="CH0-3 文件路径")
     parser.add_argument(
         "-c",

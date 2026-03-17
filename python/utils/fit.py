@@ -11,7 +11,7 @@ from scipy.optimize import curve_fit
 def _smooth_waveform_for_fast_fit(
     waveform: np.ndarray,
     smooth_window: int = 5,
-    smooth_times: int = 5,
+    smooth_times: int = 35,
 ) -> np.ndarray:
     """
     针对快放信号前沿拟合所用的统一平滑函数。
@@ -52,7 +52,24 @@ def _compute_fast_fit_params(
     baseline_window_us: float = 2.0,
 ) -> Dict[str, float]:
     """
-    通用的快放前沿 tanh 拟合函数。
+    兼容旧接口的快放前沿 tanh 拟合函数。
+    内部调用带返回“实际拟合点数”的实现，并丢弃该返回值。
+    """
+    params, _ = _compute_fast_fit_params_with_npoints(
+        waveform,
+        sampling_interval_ns=sampling_interval_ns,
+        baseline_window_us=baseline_window_us,
+    )
+    return params
+
+
+def _compute_fast_fit_params_with_npoints(
+    waveform: np.ndarray,
+    sampling_interval_ns: float = 4.0,
+    baseline_window_us: float = 2.0,
+) -> tuple[Dict[str, float], int]:
+    """
+    通用的快放前沿 tanh 拟合函数，同时返回实际用于拟合的点数。
 
     约定：
     - 输入为单道快放波形 `waveform`（任意长度的一维数组），采样间隔为 `sampling_interval_ns`；
@@ -60,7 +77,7 @@ def _compute_fast_fit_params(
     - 在平滑波形上，从起点到峰值再往后 2000 个点作为统一的拟合区间；
     - 只做一次局部拟合，不做多轮或全局 fallback；
     - 拟合质量（tanh_rms）仅在上述拟合区间上计算；
-    - 若判断无有效快放或拟合失败，则返回各参数和 RMS 均为一个明显异常的大值，方便后续参数空间筛选。
+    - 若判断无有效快放或拟合失败，则返回各参数和 RMS 均为一个明显异常的大值，n_points 返回 0。
     """
     abnormal_value = 1e6
 
@@ -76,15 +93,18 @@ def _compute_fast_fit_params(
     amp = waveform_smooth - baseline_front
     max_amp = float(np.max(amp))
 
-    # 无明显快放或波形过短，直接返回异常值，方便后处理筛除
+    # 无明显快放或波形过短，直接返回异常值，n_points=0
     if max_amp <= 0 or n_samples < 5:
-        return {
-            "tanh_p0": abnormal_value,
-            "tanh_p1": abnormal_value,
-            "tanh_p2": abnormal_value,
-            "tanh_p3": abnormal_value,
-            "tanh_rms": abnormal_value,
-        }
+        return (
+            {
+                "tanh_p0": abnormal_value,
+                "tanh_p1": abnormal_value,
+                "tanh_p2": abnormal_value,
+                "tanh_p3": abnormal_value,
+                "tanh_rms": abnormal_value,
+            },
+            0,
+        )
 
     # 统一使用“起点到峰值再往后 2000 个点”的局部区间做拟合
     idx_max = int(np.argmax(amp))
@@ -92,6 +112,8 @@ def _compute_fast_fit_params(
     mask = np.arange(n_samples) <= idx_end
     x_data = time_axis_us[mask]
     y_data = waveform_smooth[mask]
+
+    n_points = int(np.count_nonzero(mask))
 
     # 初值估计：幅值、基线、上升中心、上升速度
     p0_init, p3_init = max_amp, baseline_front
@@ -101,7 +123,7 @@ def _compute_fast_fit_params(
     p1_init = 1.0 / (float(x_data[-1] - x_data[0]) + 1e-6)
 
     popt = None
-    if np.count_nonzero(mask) >= 5:
+    if n_points >= 5:
         try:
             popt, _ = curve_fit(
                 _tanh_rise,
@@ -117,23 +139,29 @@ def _compute_fast_fit_params(
         # 仅在拟合区间内评估残差 RMS
         fit_curve_seg = _tanh_rise(x_data, *popt)
         residuals = y_data - fit_curve_seg
-        tanh_rms = float(np.sqrt(np.mean(residuals ** 2)))
-        return {
-            "tanh_p0": float(popt[0]),
-            "tanh_p1": float(popt[1]),
-            "tanh_p2": float(popt[2]),
-            "tanh_p3": float(popt[3]),
-            "tanh_rms": tanh_rms,
-        }
+        tanh_rms = float(np.sqrt(np.mean(residuals**2)))
+        return (
+            {
+                "tanh_p0": float(popt[0]),
+                "tanh_p1": float(popt[1]),
+                "tanh_p2": float(popt[2]),
+                "tanh_p3": float(popt[3]),
+                "tanh_rms": tanh_rms,
+            },
+            n_points,
+        )
 
-    # 拟合失败：赋予明显异常的极大值，便于后续在参数空间中识别
-    return {
-        "tanh_p0": abnormal_value,
-        "tanh_p1": abnormal_value,
-        "tanh_p2": abnormal_value,
-        "tanh_p3": abnormal_value,
-        "tanh_rms": abnormal_value,
-    }
+    # 拟合失败：赋予明显异常的极大值，n_points=0
+    return (
+        {
+            "tanh_p0": abnormal_value,
+            "tanh_p1": abnormal_value,
+            "tanh_p2": abnormal_value,
+            "tanh_p3": abnormal_value,
+            "tanh_rms": abnormal_value,
+        },
+        0,
+    )
 
 
 def debug_plot_fast_fit_ch3_from_first_hdf5(
