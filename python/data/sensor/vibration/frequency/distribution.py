@@ -6,7 +6,7 @@
 功能：
 - 复用 `select.py` 中的数据读取与筛选函数
 - 对每个传感器的三个轴（Frequency_x / y / z）做频率分布统计
-- 将各轴分布绘制为直方图（可选叠加核密度曲线）
+- 将各轴分布绘制为直方图
 """
 
 import os
@@ -62,7 +62,7 @@ def plot_frequency_distribution_per_detector(
 
     has_detector = "detector_num" in data_dict
 
-    # 统一的绘图风格
+    # 统一的绘图风格（与 accelerate/select.py 一致）
     plt.rcParams.update(
         {
             "font.size": 11,
@@ -124,9 +124,7 @@ def plot_frequency_distribution_per_detector(
                 ax.set_title(f"{title_prefix} - {col} (no data)")
                 continue
 
-            # 计算统计量
-            v_min, v_max = np.min(values), np.max(values)
-            v_mean, v_std = np.mean(values), np.std(values)
+            v_min, v_max = float(np.min(values)), float(np.max(values))
 
             # 画直方图
             color = freq_colors.get(col, "#2E86AB")
@@ -140,53 +138,27 @@ def plot_frequency_distribution_per_detector(
                 linewidth=0.5,
             )
 
-            # 也可以叠加一个高斯近似（可选）
-            try:
-                from scipy.stats import norm  # 若环境中无 scipy，会抛异常
+            # 每个子图 x 轴仅覆盖当前轴数据范围（略加边距）
+            span = v_max - v_min
+            pad = 0.02 * span if span > 0 else max(abs(v_min), abs(v_max), 1.0) * 1e-6
+            ax.set_xlim(v_min - pad, v_max + pad)
 
-                x_grid = np.linspace(v_min, v_max, 400)
-                pdf = norm.pdf(x_grid, v_mean, v_std if v_std > 0 else 1.0)
-                ax.plot(x_grid, pdf, "r--", linewidth=1.2, label="Gaussian fit")
-                ax.legend(loc="upper right", framealpha=0.9)
-            except Exception:
-                # 没有 scipy 就只画直方图
-                pass
-
-            ax.set_xlabel(f"{col} (Hz)")
-            ax.set_ylabel("Density")
-            ax.set_title(f"{title_prefix} - {col} distribution")
+            # 轴标签与刻度字体（与 accelerate/select.py 一致）
+            ax.set_xlabel(f"{col} (Hz)", fontsize=16, fontweight="normal")
+            ax.set_ylabel("Density", fontsize=16, fontweight="normal")
+            ax.set_title(
+                f"{title_prefix} - {col} distribution",
+                fontsize=13,
+                fontweight="normal",
+            )
+            ax.tick_params(axis="both", which="major", labelsize=12)
+            ax.tick_params(top=False, right=False)
 
             # y 轴格式与网格
             ax.yaxis.set_major_formatter(ticker.ScalarFormatter(useOffset=False))
             ax.yaxis.get_major_formatter().set_scientific(False)
             ax.grid(True, which="major", linestyle="-", linewidth=0.7, alpha=0.3, color="gray")
             ax.grid(True, which="minor", linestyle="--", linewidth=0.5, alpha=0.2, color="gray")
-
-            # 统计信息框
-            stats_text = (
-                f"N = {values.size}\n"
-                f"Min = {v_min:.3f} Hz\n"
-                f"Max = {v_max:.3f} Hz\n"
-                f"Mean = {v_mean:.3f} Hz\n"
-                f"Std = {v_std:.3f} Hz"
-            )
-            ax.text(
-                0.98,
-                0.98,
-                stats_text,
-                transform=ax.transAxes,
-                verticalalignment="top",
-                horizontalalignment="right",
-                bbox=dict(
-                    boxstyle="round,pad=0.5",
-                    facecolor="white",
-                    edgecolor="gray",
-                    alpha=0.8,
-                    linewidth=0.8,
-                ),
-                fontsize=9,
-                family="monospace",
-            )
 
         plt.tight_layout()
 
@@ -232,7 +204,7 @@ if __name__ == "__main__":
             detector_num=[1, 2, 3, 4, 5],
             start_date="2025-05-28",
             end_date="2025-06-10",
-            downsample_factor=100,
+            downsample_factor=1000,
         )
 
         if not data_multi:
@@ -240,10 +212,10 @@ if __name__ == "__main__":
         else:
             print("开始绘制每个传感器三个轴的频率分布直方图...")
             # 若不想保存，只需将 save_dir 设为 None
-            out_dir = os.path.join(project_root, "imgaes", "frequency_distribution")
+            out_dir = os.path.join(project_root, "images/presentation", "frequency_distribution")
             plot_frequency_distribution_per_detector(
                 data_multi,
-                bins=80,
+                bins=100,
                 save_dir=out_dir,
                 show_plot=True,
                 figsize=(12, 9),

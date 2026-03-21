@@ -301,25 +301,25 @@ def plot_temp_vs_datetime_vibration(data_dict: Dict[str, np.ndarray],
     if len(datetime_arr) == 0:
         raise ValueError("'Temperature' 列中没有有效数据（过滤后）")
     
-    # 设置matplotlib参数以获得更好的科研图表样式
+    # 设置matplotlib参数（与 unite.py 对齐）
     plt.rcParams.update({
         'font.size': 11,
         'font.family': 'sans-serif',
         'font.sans-serif': ['Arial', 'DejaVu Sans', 'Liberation Sans'],
         'axes.linewidth': 1.2,
-        'axes.labelsize': 12,
-        'axes.titlesize': 13,
-        'xtick.labelsize': 10,
-        'ytick.labelsize': 10,
+        'axes.labelsize': 16,
+        'axes.titlesize': 18,
+        'xtick.labelsize': 12,
+        'ytick.labelsize': 12,
         'xtick.major.width': 1.2,
         'ytick.major.width': 1.2,
         'xtick.minor.width': 0.8,
         'ytick.minor.width': 0.8,
         'xtick.direction': 'in',
         'ytick.direction': 'in',
-        'xtick.top': True,
-        'ytick.right': True,
-        'legend.fontsize': 10,
+        'xtick.top': False,
+        'ytick.right': False,
+        'legend.fontsize': 12,
         'legend.frameon': True,
         'legend.framealpha': 0.9,
         'figure.dpi': 100
@@ -348,8 +348,8 @@ def plot_temp_vs_datetime_vibration(data_dict: Dict[str, np.ndarray],
                         linewidth=1.5,
                         alpha=0.85,
                         color=color,
-                        label=f'Detector {det_num}')
-                legend_labels.append(f'Detector {det_num}')
+                        label=f'Sensor {det_num}')
+                legend_labels.append(f'Sensor {det_num}')
                 
                 # 计算统计信息
                 mean_val = np.mean(det_temp)
@@ -360,7 +360,7 @@ def plot_temp_vs_datetime_vibration(data_dict: Dict[str, np.ndarray],
         
         # 添加图例
         ax.legend(legend_labels, loc='upper right', framealpha=0.9, edgecolor='gray',
-                  frameon=True, fancybox=False, shadow=False)
+                  frameon=True, fancybox=False, shadow=False, fontsize=12)
         
         # 添加统计信息框（显示所有探测器的统计信息）
         stats_text = 'Statistics:\n'
@@ -390,7 +390,7 @@ def plot_temp_vs_datetime_vibration(data_dict: Dict[str, np.ndarray],
         
         # 添加图例
         ax.legend([label], loc='upper right', framealpha=0.9, edgecolor='gray',
-                  frameon=True, fancybox=False, shadow=False)
+                  frameon=True, fancybox=False, shadow=False, fontsize=12)
         
         # 添加统计信息框
         stats_text = (f'N = {len(temp_arr)}\n'
@@ -401,76 +401,27 @@ def plot_temp_vs_datetime_vibration(data_dict: Dict[str, np.ndarray],
         
         all_temps = temp_arr
     
-    # 设置标签和标题（使用英文）
-    ax.set_xlabel('Time', fontsize=13, fontweight='normal')
-    ax.set_ylabel('Temperature (°C)', fontsize=13, fontweight='normal')
+    # 设置标签和标题（使用英文，与 unite.py 对齐）
+    ax.set_xlabel('Time', fontsize=16, fontweight='normal')
+    ax.set_ylabel('Temperature (°C)', fontsize=16, fontweight='normal')
+    ax.tick_params(axis="both", which="major", labelsize=12)
     
-    # 格式化x轴日期 - 根据时间范围自动选择格式
-    time_span = datetime_arr[-1] - datetime_arr[0]
-    
-    # 转换为timedelta（处理numpy datetime类型）
-    if hasattr(time_span, 'days'):
-        days = time_span.days
-        total_hours = time_span.total_seconds() / 3600
-    else:
-        # 如果是numpy timedelta64
-        days = time_span.astype('timedelta64[D]').astype(int)
-        total_hours = time_span.astype('timedelta64[h]').astype(int)
-    
-    if days > 30:
-        # 超过30天，只显示日期
-        date_format = '%Y-%m-%d'
-        locator = mdates.DayLocator(interval=max(1, days // 10))
-        minor_locator = mdates.HourLocator(interval=6)  # 每6小时一个次要刻度
-    elif days > 1:
-        # 1-30天，显示日期和时间
-        date_format = '%m-%d %H:%M'
-        major_interval = max(1, int(total_hours / 10))
-        locator = mdates.HourLocator(interval=major_interval)
-        minor_locator = mdates.MinuteLocator(interval=30)  # 每30分钟一个次要刻度
-    else:
-        # 小于1天，只显示时间
-        date_format = '%H:%M'
-        major_interval = max(1, int(total_hours / 8))
-        locator = mdates.HourLocator(interval=major_interval)
-        minor_locator = mdates.MinuteLocator(interval=15)  # 每15分钟一个次要刻度
-    
-    ax.xaxis.set_major_formatter(mdates.DateFormatter(date_format))
+    # 使用 AutoDateLocator + ConciseDateFormatter 自动生成简洁清晰的时间轴（与 unite.py 一致）
+    locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
+    formatter = mdates.ConciseDateFormatter(locator)
     ax.xaxis.set_major_locator(locator)
-    ax.xaxis.set_minor_locator(minor_locator)
-    plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+    ax.xaxis.set_major_formatter(formatter)
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=0, ha='center')
     
     # 设置y轴格式，确保显示真实值而不是偏移量
     ax.yaxis.set_major_formatter(ticker.ScalarFormatter(useOffset=False))
     ax.yaxis.get_major_formatter().set_scientific(False)
     
-    # 添加y轴的次要刻度
-    temp_range = np.max(all_temps) - np.min(all_temps)
-    if temp_range > 0:
-        # 根据温度范围自动设置次要刻度间隔
-        minor_interval = temp_range / 20
-        ax.yaxis.set_minor_locator(ticker.MultipleLocator(minor_interval))
-    
-    # 改进网格线样式
-    ax.grid(True, which='major', linestyle='-', linewidth=0.7, alpha=0.3, color='gray')
-    ax.grid(True, which='minor', linestyle='--', linewidth=0.5, alpha=0.2, color='gray')
-    
-    # 设置坐标轴边框样式
+
+    # 顶部和右边不显示刻度线及边框（与 unite.py 对齐）
+    ax.tick_params(top=False, right=False)
     ax.spines['top'].set_visible(True)
     ax.spines['right'].set_visible(True)
-    ax.spines['top'].set_color('gray')
-    ax.spines['right'].set_color('gray')
-    ax.spines['bottom'].set_color('black')
-    ax.spines['left'].set_color('black')
-    
-    # 在图的角落添加统计信息框
-    ax.text(0.98, 0.02, stats_text, transform=ax.transAxes,
-            verticalalignment='bottom',
-            horizontalalignment='right',
-            bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
-                     edgecolor='gray', alpha=0.8, linewidth=0.8),
-            fontsize=9,
-            family='monospace')
     
     plt.tight_layout()
     
@@ -508,8 +459,8 @@ if __name__ == '__main__':
                                                     detector_num=[1, 2, 3, 4, 5],
                                                     start_date='2025-05-28',
                                                     end_date='2025-06-10',
-                                                    downsample_factor=100)  # 降采样，每隔10个点读取1个
-        if data_multi:
+                                                    downsample_factor=1000)  # 降采样，每隔10个点读取1个
+        if data_multi: 
             print(f'\n筛选结果包含以下列: {list(data_multi.keys())}')
             print(f'数据点数量: {len(data_multi["datetime"])}')
             if 'detector_num' in data_multi:

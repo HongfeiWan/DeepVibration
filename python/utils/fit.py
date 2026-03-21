@@ -163,6 +163,39 @@ def _compute_fast_fit_params_with_npoints(
         0,
     )
 
+def _compute_fast_fit_npoints_only(
+    waveform: np.ndarray,
+    sampling_interval_ns: float = 4.0,
+    baseline_window_us: float = 2.0,
+) -> int:
+    """
+    仅计算快放拟合中“实际用于拟合的点数”：
+        - 使用与 _compute_fast_fit_params_with_npoints 完全相同的
+          平滑、减基线和拟合区间选择逻辑；
+        - 但不执行 curve_fit 拟合本身，以节省计算量；
+        - 若无有效快放或波形过短，则返回 0。
+    """
+    waveform_smooth = _smooth_waveform_for_fast_fit(waveform)
+    time_axis_us = np.arange(waveform_smooth.size) * sampling_interval_ns / 1000.0
+    n_samples = len(time_axis_us)
+
+    baseline_window_ns = baseline_window_us * 1000.0
+    samples_baseline = int(round(baseline_window_ns / sampling_interval_ns))
+    samples_baseline = max(1, min(samples_baseline, waveform_smooth.size // 2))
+
+    baseline_front = float(np.mean(waveform_smooth[:samples_baseline]))
+    amp = waveform_smooth - baseline_front
+    max_amp = float(np.max(amp))
+
+    if max_amp <= 0 or n_samples < 5:
+        return 0
+
+    idx_max = int(np.argmax(amp))
+    idx_end = min(idx_max + 2000, n_samples - 1)
+    mask = np.arange(n_samples) <= idx_end
+    n_points = int(np.count_nonzero(mask))
+    return n_points
+
 
 def debug_plot_fast_fit_ch3_from_first_hdf5(
     max_events: Optional[int] = None,

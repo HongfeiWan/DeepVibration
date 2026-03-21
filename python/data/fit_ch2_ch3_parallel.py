@@ -43,7 +43,10 @@ if parent_dir not in sys.path:
 
 project_root = os.path.dirname(parent_dir)         # 项目根目录
 
-from utils.fit import _compute_fast_fit_params_with_npoints  # type: ignore  # noqa: E402
+from utils.fit import (  # type: ignore  # noqa: E402
+    _compute_fast_fit_params_with_npoints,
+    _compute_fast_fit_npoints_only,
+)
 from utils.frequency import (  # type: ignore  # noqa: E402
     _compute_fast_highfreq_energy_ratio,
     _compute_spectral_centroid_mhz,
@@ -447,7 +450,7 @@ def _backfill_n_fit_points_for_param_dir(param_dir: str, channel_idx: int) -> No
             print(f"[补写 n_fit_points] 找不到源 CH0-3 文件，跳过: {source_file_str}")
             continue
 
-        # 从源 CH0-3 文件读取该通道的所有事件波形
+        # 从源 CH0-3 文件读取该通道的所有事件波形到内存，避免在文件关闭后访问 h5 数据集
         with h5py.File(source_file_str, "r") as f_ch:
             ch_data = f_ch["channel_data"]
             time_samples, num_channels, num_events = ch_data.shape
@@ -457,6 +460,7 @@ def _backfill_n_fit_points_for_param_dir(param_dir: str, channel_idx: int) -> No
                     f"channel_idx={channel_idx}, num_channels={num_channels}，跳过。"
                 )
                 continue
+            waveforms = ch_data[:, channel_idx, :].astype(np.float32)
 
         # 依据现有参数文件中某个数据集的长度来确定事件数
         with h5py.File(param_path, "r") as f_param:
@@ -465,7 +469,7 @@ def _backfill_n_fit_points_for_param_dir(param_dir: str, channel_idx: int) -> No
                 continue
             n_param_events = f_param["tanh_p0"].shape[0]
 
-        n_events = min(num_events, n_param_events)
+        n_events = min(waveforms.shape[1], n_param_events)
         if n_events == 0:
             print(f"[补写 n_fit_points] 文件 {param_path} 无事件可处理，跳过。")
             continue
@@ -480,16 +484,16 @@ def _backfill_n_fit_points_for_param_dir(param_dir: str, channel_idx: int) -> No
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
             for ev in range(n_events):
-                wf_ev = ch_data[:, channel_idx, ev].astype(np.float32)
-                fut = executor.submit(_compute_fast_fit_params_with_npoints, wf_ev)
+                wf_ev = waveforms[:, ev]
+                fut = executor.submit(_compute_fast_fit_npoints_only, wf_ev)
                 futures[fut] = ev
 
             for fut in as_completed(futures):
                 ev = futures[fut]
-                _, n_pts = fut.result()
+                n_pts = fut.result()
                 n_fit_points[ev] = int(n_pts)
 
-        with h5py.File(param_path, "a") as f_param:
+        with h5py.File(param_path, "a") as f_param: 
             if "n_fit_points" in f_param:
                 print(f"[补写 n_fit_points] 数据集已存在，跳过写入: {param_path}")
             else:

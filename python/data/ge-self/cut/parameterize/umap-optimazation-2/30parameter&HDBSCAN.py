@@ -18,6 +18,7 @@
 """
 
 from __future__ import annotations
+import concurrent.futures
 import os
 import sys
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ import numpy as np
 import umap
 import hdbscan
 from sklearn.preprocessing import StandardScaler
+from sklearn.neighbors import KNeighborsClassifier
 import matplotlib.pyplot as plt
 
 @dataclass
@@ -353,21 +355,25 @@ def run_umap_hdbscan(
     n_neighbors: int = 15,
     min_dist: float = 0.1,
     min_cluster_size: int = 50,
-    min_samples: int = None,) -> Tuple[np.ndarray, np.ndarray]:
+    min_samples: int = None,
+    prediction_data: bool = False,) -> Tuple[np.ndarray, np.ndarray]:
     """
     在给定的特征矩阵上执行 UMAP 降维和 HDBSCAN 聚类。
     返回:
         embedding: (n_events, 2) 的二维 UMAP 嵌入
         labels:    (n_events,) 的 HDBSCAN 聚类标签（-1 表示噪声）
+    prediction_data: 若为 True，HDBSCAN 会预计算供 approximate_predict 使用的数据。
     """
     reducer = umap.UMAP(
         n_neighbors=n_neighbors,
         min_dist=min_dist,
         n_components=2,
         metric="euclidean",
-        #random_state=42,     # 固定随机种子，确保结果可复现
-        random_state=None,
-        n_jobs=-1,           # 使用所有可用 CPU 核并行加速 UMAP
+        random_state=42,     # 固定随机种子，确保结果可复现
+        low_memory=True,     # 防止爆内存
+        force_approximation_algorithm=True,
+        verbose=True,
+        n_jobs=-1           # 使用所有可用 CPU 核并行加速 UMAP
     )
     embedding = reducer.fit_transform(features)
 
@@ -377,18 +383,165 @@ def run_umap_hdbscan(
         metric="euclidean",
         cluster_selection_method="eom",
         core_dist_n_jobs=-1,  # 使用所有 CPU 核并行计算 core distances
+        prediction_data=prediction_data,  # 为 approximate_predict 准备数据
     )
     labels = clusterer.fit_predict(embedding)
     return embedding, labels
+
+
+def _fit_umap_hdbscan_on_sample(
+    X_sampled: np.ndarray,
+    n_neighbors: int = 15,
+    min_dist: float = 0.1,
+    min_cluster_size: int = 50,
+    min_samples: int = None,
+) -> Tuple[umap.UMAP, hdbscan.HDBSCAN, np.ndarray, np.ndarray]:
+    """
+    仅在抽样子集上拟合 UMAP 和 HDBSCAN，返回训练好的模型，供后续外推使用。
+    HDBSCAN 固定使用 prediction_data=True，以支持 approximate_predict。
+    返回: (reducer, clusterer, embedding_sampled, labels_sampled)
+    """
+    reducer = umap.UMAP(
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        n_components=2,
+        metric="euclidean",
+        random_state=42,
+        low_memory=True,
+        force_approximation_algorithm=True,
+        verbose=True,
+        n_jobs=-1,
+    )
+    embedding_s = reducer.fit_transform(X_sampled)
+
+    clusterer = hdbscan.HDBSCAN(
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        metric="euclidean",
+        cluster_selection_method="eom",
+        core_dist_n_jobs=-1,
+        prediction_data=True,  # 必需，否则 approximate_predict 无法使用
+    )
+    labels_s = clusterer.fit_predict(embedding_s)
+    return reducer, clusterer, embedding_s, labels_s
+
+
+def _resolve_extrapolate_n_jobs(n_jobs: int) -> int:
+    """n_jobs=-1 表示使用全部逻辑 CPU；0 或 1 表示单进程顺序外推。"""
+    if n_jobs == 0 or n_jobs == 1:
+        return 1
+    if n_jobs < 0:
+        return max(1, os.cpu_count() or 1)
+    return max(1, int(n_jobs))
+
+
+def _split_index_ranges(n: int, n_parts: int) -> List[Tuple[int, int]]:
+    """将 [0, n) 均分为 n_parts 段，返回 [(start, end), ...]，end 为开区间。"""
+    n_parts = min(max(1, n_parts), n)
+    edges = np.linspace(0, n, n_parts + 1, dtype=np.int64)
+    return [(int(edges[i]), int(edges[i + 1])) for i in range(n_parts)]
+
+
+def _extrapolate_one_chunk_worker(
+    args: Tuple[umap.UMAP, KNeighborsClassifier, np.ndarray],
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    多进程 worker：对一块 X_remaining 做 UMAP transform + KNN 预测。
+    必须在模块顶层以便 pickle/spawn。
+    """
+    reducer, knn, X_chunk = args
+    emb_batch = reducer.transform(X_chunk)
+    lab_batch = knn.predict(emb_batch).astype(np.int32)
+    return emb_batch.astype(np.float32), lab_batch
+
+
+def extrapolate_cluster_labels(
+    reducer: umap.UMAP,
+    embedding_train: np.ndarray,
+    labels_train: np.ndarray,
+    X_remaining: np.ndarray,
+    batch_size: int = 50000,
+    knn_neighbors: int = 15,
+    n_jobs: int = -1,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    对未参与训练的样本进行 UMAP transform，再用 KNN 在训练集嵌入上投票分配 cluster 标签。
+    UMAP transform 会把新点投影到训练嵌入的 periphery，导致 approximate_predict 几乎全判为 noise。
+    改用 KNN：根据外推点在 2D 嵌入空间中最近的 k 个训练点的标签做多数投票，更符合物理预期。
+
+    n_jobs: 外推并行进程数。-1 为使用全部 CPU；1 为单进程按 batch_size 顺序处理（便于调试）。
+    多进程时 KNN 内部 n_jobs=1，避免与多进程争抢线程。
+    """
+    # 进程内单线程 KNN，避免 n 进程 × 每进程多线程 过度订阅
+    knn = KNeighborsClassifier(
+        n_neighbors=knn_neighbors,
+        weights="distance",
+        n_jobs=1,
+    )
+    knn.fit(embedding_train.astype(np.float64), labels_train)
+
+    n = X_remaining.shape[0]
+    embedding_full = np.empty((n, 2), dtype=np.float32)
+    labels_full = np.empty(n, dtype=np.int32)
+
+    n_workers = _resolve_extrapolate_n_jobs(n_jobs)
+    if n_workers <= 1 or n < 2:
+        for start in range(0, n, batch_size):
+            end = min(start + batch_size, n)
+            X_batch = X_remaining[start:end]
+            emb_batch = reducer.transform(X_batch)
+            lab_batch = knn.predict(emb_batch).astype(np.int32)
+            embedding_full[start:end] = emb_batch.astype(np.float32)
+            labels_full[start:end] = lab_batch
+            if batch_size < n:
+                pct = 100.0 * end / n
+                print(f"[外推] 已处理 {end}/{n} 事例 ({pct:.1f}%)")
+        return embedding_full, labels_full
+
+    ranges = _split_index_ranges(n, n_workers)
+    print(
+        f"[外推] 使用 {len(ranges)} 个进程并行处理 {n} 条事例 "
+        f"(每段约 {n // len(ranges)} 条)…"
+    )
+    tasks: List[Tuple[Tuple[int, int], Tuple[umap.UMAP, KNeighborsClassifier, np.ndarray]]] = []
+    for start, end in ranges:
+        X_chunk = X_remaining[start:end]
+        tasks.append(((start, end), (reducer, knn, X_chunk)))
+
+    with concurrent.futures.ProcessPoolExecutor(max_workers=len(ranges)) as ex:
+        # 保持与 ranges 顺序一致提交，便于按序写回
+        future_to_slice = {
+            ex.submit(_extrapolate_one_chunk_worker, t[1]): t[0] for t in tasks
+        }
+        done = 0
+        for fut in concurrent.futures.as_completed(future_to_slice):
+            start, end = future_to_slice[fut]
+            emb_part, lab_part = fut.result()
+            embedding_full[start:end] = emb_part
+            labels_full[start:end] = lab_part
+            done += end - start
+            pct = 100.0 * done / n
+            print(f"[外推] 已完成 {done}/{n} 事例 ({pct:.1f}%)")
+
+    return embedding_full, labels_full
 
 # -----------------------------------------------------------------------------
 # 测试 umap
 # -----------------------------------------------------------------------------
 def _test_umap_with_selected_features(
     X: np.ndarray,
-    feature_names: List[str],) -> Tuple[np.ndarray, np.ndarray]:
+    feature_names: List[str],
+    do_sampling: bool = True,
+    max_points: int = 100000,
+    extrapolate_batch_size: int = 50000,
+    extrapolate_n_jobs: int = -1,
+    random_state: int = 42,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     临时测试函数：仅使用 15 个物理上最重要的特征做 UMAP+HDBSCAN。
+    当 do_sampling=True 且 n_events > max_points 时，采用「抽样训练 + 分批外推」流程：
+    在 10 万点上训练 UMAP+HDBSCAN，再对剩余事例 transform + KNN 赋标签。
+    extrapolate_n_jobs=-1 时外推阶段使用多进程（每进程一段数据）；设为 1 则单进程顺序外推。
 
     当前选取的 15 个维度（8 个 CH0 波形参数 + 5 个快放拟合参数 + 1 个快放高频能量占比 + 1 个快放频谱质心）：
         - CH0（来自 preprocessor.py 中的 dataset：max_ch0, ch0ped_mean, ch0pedt_mean,
@@ -476,28 +629,61 @@ def _test_umap_with_selected_features(
     #   - <1.0  表示“弱化”该维度（接近 0 相当于忽略）
     # ------------------------------------------------------------------
     weights = np.array([
-        0.1,  # 0  ch0_max_ch0             ：总幅度，决定能量
-        1.0,  # 1  ch0_ch0ped_mean         ：基线平均值，区分基线偏移
-        1.0,  # 2  ch0_ch0pedt_mean        ：时间窗内基线平均，抑制慢漂移
-        0.5,  # 3  ch0_ch0ped_var          ：基线方差，反映噪声水平
+        1.0,  # 0  ch0_max_ch0             ：总幅度，决定能量               没那么重要    
+        0.0,  # 1  ch0_ch0ped_mean         ：基线平均值，区分基线偏移        没那么重要
+        1.0,  # 2  ch0_ch0pedt_mean        ：时间窗内基线平均，抑制慢漂移     没那么重要
+        1.0,  # 3  ch0_ch0ped_var          ：基线方差，反映噪声水平          没那么重要
         1.0,  # 4  ch0_ch0pedt_var         ：时间相关的基线方差
-        3.0,  # 5  ch0_tmax_ch0            ：峰位置，区分波形时间结构
+        1.0,  # 5  ch0_tmax_ch0            ：峰位置，区分波形时间结构
         1.0,  # 6  ch0_ch0ped_rms          ：基线 RMS
-        2.0,  # 7  ch0_ch0pedt_rms         ：时间窗内 RMS
-        1.0,  # 8  ch3_tanh_p0             ：快放脉冲幅度
+        1.0,  # 7  ch0_ch0pedt_rms         ：时间窗内 RMS
+        2.0,  # 8  ch3_tanh_p0             ：快放脉冲幅度
         1.0,  # 9  ch3_tanh_p1             ：时间尺度/上升沿相关
         1.0,  # 10 ch3_tanh_p2             ：形状参数
         1.0,  # 11 ch3_tanh_p3             ：形状/平顶相关
         1.0,  # 12 ch3_tanh_rms            ：tanh 残差 RMS
         1.0,  # 13 ch3_highfreq_energy_ratio ：高频能量占比
-        1.0,  # 14 ch3_spectral_centroid_mhz ：频谱质心，强调峰移向高频
+        2.0,  # 14 ch3_spectral_centroid_mhz ：频谱质心，强调峰移向高频
     ], dtype=float)
 
     # 将权重作用在“标准化后的特征”上，相当于在欧氏距离中调节各维度贡献
     X_weighted = X_sel_std * weights
 
-    # 直接复用全局 run_umap_hdbscan 参数（可根据需要调整）
-    embedding, labels = run_umap_hdbscan(X_weighted, min_cluster_size=11,n_neighbors=12, min_samples=None,)
+    n_total = X_weighted.shape[0]
+    umap_kw = dict(min_cluster_size=125, n_neighbors=10, min_samples=None, min_dist=0.1)
+
+    if do_sampling and n_total > max_points:
+        # 抽样训练 + 分批外推：先在 10 万点上 fit，再对剩余事例 extrapolate
+        rng = np.random.default_rng(random_state)
+        sampled_idx = rng.choice(n_total, size=max_points, replace=False).astype(np.int64)
+        X_sampled = X_weighted[sampled_idx]
+
+        print(f"[测试 UMAP] 抽样 {max_points} 点进行训练，剩余 {n_total - max_points} 点分批外推。")
+        reducer, clusterer, emb_s, lab_s = _fit_umap_hdbscan_on_sample(
+            X_sampled, **umap_kw
+        )
+
+        remaining_idx = np.setdiff1d(np.arange(n_total, dtype=np.int64), sampled_idx)
+        X_remaining = X_weighted[remaining_idx]
+        emb_rem, lab_rem = extrapolate_cluster_labels(
+            reducer,
+            emb_s,
+            lab_s,
+            X_remaining,
+            batch_size=extrapolate_batch_size,
+            n_jobs=extrapolate_n_jobs,
+        )
+
+        embedding = np.empty((n_total, 2), dtype=np.float32)
+        labels = np.empty(n_total, dtype=np.int32)
+        embedding[sampled_idx] = emb_s.astype(np.float32)
+        labels[sampled_idx] = lab_s.astype(np.int32)
+        embedding[remaining_idx] = emb_rem
+        labels[remaining_idx] = lab_rem
+        print(f"[测试 UMAP] 全量 {n_total} 事例的 cluster 标签已外推完成。")
+    else:
+        # 数据量可接受，直接全量 fit
+        embedding, labels = run_umap_hdbscan(X_weighted, **umap_kw)
 
     uniq, counts = np.unique(labels, return_counts=True)
     stats = {int(l): int(c) for l, c in zip(uniq, counts)}
@@ -649,6 +835,16 @@ def main() -> None:
     X = X[mask_physical]
     all_sources = [src for src, keep in zip(all_sources, mask_physical) if keep]
     n_total_events = n_kept
+
+    #-------- 可选：UMAP 前同步抽样以加速 --------
+    # do_umap_sampling = True
+    # X, all_sources, sampled_idx = maybe_uniform_sample_for_umap(
+    #     X,
+    #     all_sources,
+    #     do_sampling=do_umap_sampling,
+    #     max_points=100000,
+    #     random_state=42,)
+    # print(f"[UMAP] 物理筛选后事件数: {n_kept}，UMAP 抽样后事件数: {X.shape[0]}。")
 
     # -------- 测试：仅用少数选定特征做一次 UMAP+HDBSCAN --------
     # 方便快速观察 CH0/CH3 关键参数的聚类效果，并将结果缓存为事件映射 HDF5。

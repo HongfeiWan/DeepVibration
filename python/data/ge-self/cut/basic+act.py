@@ -480,9 +480,9 @@ if __name__ == "__main__":
     pn_mask = cut_pncut(mask, max_ch0, max_ch1)
     n_final = int(mask.sum())
     print(f"\n依次使用6种 cut 后最终剩余: {n_final} / {n_raw}")
-    mask = mask & pn_mask
-    n_final = int(mask.sum())
-    print(f"\n依次使用七种 cut 后最终剩余: {n_final} / {n_raw}")
+    # mask = mask & pn_mask
+    # n_final = int(mask.sum())
+    # print(f"\n依次使用七种 cut 后最终剩余: {n_final} / {n_raw}")
 
     # 3. 绘制最终剩余事件的 CH0max 直方图 和 CH0max vs CH1max 散点图
     _plot_ch0max_hist_passing_cuts(mask, max_ch0, max_ch1)

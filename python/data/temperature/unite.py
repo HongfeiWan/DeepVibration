@@ -163,18 +163,18 @@ def plot_united_temperature(vibration_data_dir: str,
         'font.family': 'sans-serif',
         'font.sans-serif': ['Arial', 'DejaVu Sans', 'Liberation Sans'],
         'axes.linewidth': 1.2,
-        'axes.labelsize': 12,
-        'axes.titlesize': 13,
-        'xtick.labelsize': 10,
-        'ytick.labelsize': 10,
+        'axes.labelsize': 16,
+        'axes.titlesize': 18,
+        'xtick.labelsize': 12,
+        'ytick.labelsize': 12,
         'xtick.major.width': 1.2,
         'ytick.major.width': 1.2,
         'xtick.minor.width': 0.8,
         'ytick.minor.width': 0.8,
         'xtick.direction': 'in',
         'ytick.direction': 'in',
-        'xtick.top': True,
-        'ytick.right': True,
+        'xtick.top': False,
+        'ytick.right': False,
         'legend.fontsize': 10,
         'legend.frameon': True,
         'legend.framealpha': 0.9,
@@ -186,143 +186,47 @@ def plot_united_temperature(vibration_data_dir: str,
     
     # 绘制振动传感器温度（蓝色）
     ax.plot(vibration_datetime, vibration_temp,
-            linewidth=1.5,
+            linewidth=1.0,
             alpha=0.85,
             color='#2E86AB',
             label='Vibration Sensor Temperature')
     
     # 绘制制冷机温度（使用相同颜色，不同marker区分）
     compressor_color = '#C73E1D'  # 统一的红色
-    
     for compressor_data_item in compressor_data_list:
         ax.plot(compressor_data_item['datetime'], compressor_data_item['temperature'],
-                linewidth=1.5,
+                linewidth=1.0,
                 alpha=0.85,
                 color=compressor_color,
                 marker=compressor_data_item['marker'],
-                markersize=4,
+                markersize=6,
                 markevery=max(1, len(compressor_data_item['datetime']) // 200),  # 每200个点显示一个marker
                 label=f"Compressor {compressor_data_item['label']}")
     
     # 设置标签和标题（使用英文）
-    ax.set_xlabel('Time', fontsize=13, fontweight='normal')
-    ax.set_ylabel('Temperature (°C)', fontsize=13, fontweight='normal')
+    ax.set_xlabel('Time', fontsize=16, fontweight='normal')
+    ax.set_ylabel('Temperature (°C)', fontsize=16, fontweight='normal')
+    ax.tick_params(axis="both", which="major", labelsize=12)
     
-    # 格式化x轴日期 - 根据时间范围自动选择格式
-    # 使用所有数据集的共同时间范围
-    all_datetime_list = [vibration_datetime]
-    for compressor_data_item in compressor_data_list:
-        all_datetime_list.append(compressor_data_item['datetime'])
-    all_datetime = np.concatenate(all_datetime_list)
-    all_datetime = np.sort(all_datetime)
-    
-    if len(all_datetime) > 1:
-        time_span = all_datetime[-1] - all_datetime[0]
-        
-        # 转换为timedelta（处理numpy datetime类型）
-        if hasattr(time_span, 'days'):
-            days = time_span.days
-            total_hours = time_span.total_seconds() / 3600
-        else:
-            # 如果是numpy timedelta64
-            days = time_span.astype('timedelta64[D]').astype(int)
-            total_hours = time_span.astype('timedelta64[h]').astype(int)
-        
-        if days > 30:
-            # 超过30天，显示日期和每天的6:00、12:00、18:00
-            date_format = '%m-%d %H:%M'
-            # 使用HourLocator指定每天的小时数：6:00, 12:00, 18:00
-            locator = mdates.HourLocator(byhour=[6, 12, 18])
-            minor_locator = mdates.HourLocator(interval=3)  # 每3小时一个次要刻度
-        elif days > 1:
-            # 1-30天，显示日期和时间，每天的6:00、12:00、18:00
-            date_format = '%m-%d %H:%M'
-            # 使用HourLocator指定每天的小时数：6:00, 12:00, 18:00
-            locator = mdates.HourLocator(byhour=[6, 12, 18])
-            minor_locator = mdates.HourLocator(interval=3)  # 每3小时一个次要刻度
-        else:
-            # 小于1天，显示时间，每6小时一个刻度（6:00, 12:00, 18:00, 0:00）
-            date_format = '%H:%M'
-            locator = mdates.HourLocator(byhour=[0, 6, 12, 18])  # 包括0:00
-            minor_locator = mdates.HourLocator(interval=3)  # 每3小时一个次要刻度
-        
-        ax.xaxis.set_major_formatter(mdates.DateFormatter(date_format))
-        ax.xaxis.set_major_locator(locator)
-        ax.xaxis.set_minor_locator(minor_locator)
-        plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+    # 使用 AutoDateLocator + ConciseDateFormatter 自动生成简洁清晰的时间轴
+    locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
+    formatter = mdates.ConciseDateFormatter(locator)
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(formatter)
+    plt.setp(ax.xaxis.get_majorticklabels(), rotation=0, ha='center')
     
     # 设置y轴格式，确保显示真实值而不是偏移量
     ax.yaxis.set_major_formatter(ticker.ScalarFormatter(useOffset=False))
     ax.yaxis.get_major_formatter().set_scientific(False)
     
-    # 添加y轴的次要刻度（基于所有温度值的范围）
-    all_temp_values_list = [vibration_temp]
-    for compressor_data_item in compressor_data_list:
-        all_temp_values_list.append(compressor_data_item['temperature'])
-    all_temp_values = np.concatenate(all_temp_values_list)
-    temp_range = np.max(all_temp_values) - np.min(all_temp_values)
-    if temp_range > 0:
-        # 根据温度范围自动设置次要刻度间隔
-        minor_interval = temp_range / 20
-        ax.yaxis.set_minor_locator(ticker.MultipleLocator(minor_interval))
-    
-    # 改进网格线样式
-    ax.grid(True, which='major', linestyle='-', linewidth=0.7, alpha=0.3, color='gray')
-    ax.grid(True, which='minor', linestyle='--', linewidth=0.5, alpha=0.2, color='gray')
-    
-    # 设置坐标轴边框样式
+    # 顶部和右边不显示刻度线及边框
+    ax.tick_params(top=False, right=False)
     ax.spines['top'].set_visible(True)
     ax.spines['right'].set_visible(True)
-    ax.spines['top'].set_color('gray')
-    ax.spines['right'].set_color('gray')
-    ax.spines['bottom'].set_color('black')
-    ax.spines['left'].set_color('black')
-    
-    # 计算统计信息
-    vibration_mean = np.mean(vibration_temp)
-    vibration_std = np.std(vibration_temp)
-    vibration_min = np.min(vibration_temp)
-    vibration_max = np.max(vibration_temp)
-    
-    # 计算所有compressor温度列的统计信息
-    compressor_stats_list = []
-    for compressor_data_item in compressor_data_list:
-        temp_arr = compressor_data_item['temperature']
-        compressor_stats_list.append({
-            'label': compressor_data_item['label'],
-            'n': len(temp_arr),
-            'min': np.min(temp_arr),
-            'max': np.max(temp_arr),
-            'mean': np.mean(temp_arr),
-            'std': np.std(temp_arr)
-        })
     
     # 添加图例
     ax.legend(loc='upper right', framealpha=0.9, edgecolor='gray',
-              frameon=True, fancybox=False, shadow=False)
-    
-    # 在图的角落添加统计信息框
-    stats_text = (f'Vibration Sensor:\n'
-                 f'  N = {len(vibration_temp)}\n'
-                 f'  Min = {vibration_min:.2f} °C\n'
-                 f'  Max = {vibration_max:.2f} °C\n'
-                 f'  Mean = {vibration_mean:.2f} °C\n'
-                 f'  Std = {vibration_std:.2f} °C\n'
-                 f'\nCompressor:')
-    
-    for stats in compressor_stats_list:
-        stats_text += (f'\n  {stats["label"]}:\n'
-                      f'    N = {stats["n"]}\n'
-                      f'    Mean = {stats["mean"]:.2f} °C')
-    
-    ax.text(0.98, 0.02, stats_text, transform=ax.transAxes,
-            verticalalignment='bottom',
-            horizontalalignment='right',
-            bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
-                     edgecolor='gray', alpha=0.8, linewidth=0.8),
-            fontsize=9,
-            family='monospace')
-    
+              frameon=True, fancybox=False, shadow=False, fontsize=12)
     plt.tight_layout()
     
     # 保存图片

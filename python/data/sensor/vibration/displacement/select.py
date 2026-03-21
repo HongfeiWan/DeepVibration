@@ -284,7 +284,7 @@ def plot_displacement_data(data_dict: Dict[str, np.ndarray],
     else:
         unique_detectors = None
     
-    # 设置matplotlib参数以获得更好的科研图表样式
+    # 设置matplotlib参数（与 accelerate/select.py 对齐）
     plt.rcParams.update({
         'font.size': 11,
         'font.family': 'sans-serif',
@@ -332,34 +332,6 @@ def plot_displacement_data(data_dict: Dict[str, np.ndarray],
         print('警告：没有有效数据点，无法绘图')
         return
     
-    all_datetime_valid = np.array(all_datetime_valid)
-    time_span = all_datetime_valid[-1] - all_datetime_valid[0]
-    
-    # 转换为timedelta（处理numpy datetime类型）
-    if hasattr(time_span, 'days'):
-        days = time_span.days
-        total_hours = time_span.total_seconds() / 3600
-    else:
-        # 如果是numpy timedelta64
-        days = time_span.astype('timedelta64[D]').astype(int)
-        total_hours = time_span.astype('timedelta64[h]').astype(int)
-    
-    # 根据时间范围选择日期格式
-    if days > 30:
-        date_format = '%Y-%m-%d'
-        locator = mdates.DayLocator(interval=max(1, days // 10))
-        minor_locator = mdates.HourLocator(interval=6)
-    elif days > 1:
-        date_format = '%m-%d %H:%M'
-        major_interval = max(1, int(total_hours / 10))
-        locator = mdates.HourLocator(interval=major_interval)
-        minor_locator = mdates.MinuteLocator(interval=30)
-    else:
-        date_format = '%H:%M'
-        major_interval = max(1, int(total_hours / 8))
-        locator = mdates.HourLocator(interval=major_interval)
-        minor_locator = mdates.MinuteLocator(interval=15)
-    
     # 为每个位移分量绘制子图
     for ax_idx, disp_col in enumerate(available_disp_cols):
         ax = axes[ax_idx]
@@ -386,8 +358,8 @@ def plot_displacement_data(data_dict: Dict[str, np.ndarray],
                            linewidth=1.5,
                            alpha=0.85,
                            color=color,
-                           label=f'Detector {det_num}')
-                    legend_labels.append(f'Detector {det_num}')
+                           label=f'Sensor {det_num}')
+                    legend_labels.append(f'Sensor {det_num}')
                     
                     # 计算统计信息
                     mean_val = np.mean(det_disp_valid)
@@ -418,37 +390,28 @@ def plot_displacement_data(data_dict: Dict[str, np.ndarray],
                 max_val = np.max(disp_valid)
                 all_stats.append((disp_col, len(disp_valid), min_val, max_val, mean_val, std_val))
         
-        # 设置标签
-        ax.set_ylabel(f'{disp_col} (μm)', fontsize=13, fontweight='normal')
+        # 设置标签（与 accelerate/select.py 对齐）
+        ax.set_ylabel(f'{disp_col} (μm)', fontsize=16, fontweight='normal')
         if ax_idx == len(available_disp_cols) - 1:
-            ax.set_xlabel('Time', fontsize=13, fontweight='normal')
+            ax.set_xlabel('Time', fontsize=16, fontweight='normal')
+        ax.tick_params(axis="both", which="major", labelsize=12)
         
-        # 格式化x轴日期
-        ax.xaxis.set_major_formatter(mdates.DateFormatter(date_format))
+        # 使用 AutoDateLocator + ConciseDateFormatter 自动生成简洁清晰的时间轴（与 accelerate/select.py 一致）
+        locator = mdates.AutoDateLocator(minticks=5, maxticks=12)
+        formatter = mdates.ConciseDateFormatter(locator)
         ax.xaxis.set_major_locator(locator)
-        ax.xaxis.set_minor_locator(minor_locator)
-        if ax_idx == len(available_disp_cols) - 1:
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+        ax.xaxis.set_major_formatter(formatter)
+        plt.setp(ax.xaxis.get_majorticklabels(), rotation=0, ha='center')
         
-        # 设置y轴格式，确保显示真实值而不是偏移量
-        ax.yaxis.set_major_formatter(ticker.ScalarFormatter(useOffset=False))
-        ax.yaxis.get_major_formatter().set_scientific(False)
+        # 设置y轴格式：z轴使用对数刻度，x/y轴保持线性
+        if disp_col == 'Displacement_z':
+            ax.set_yscale('log')
+        else:
+            ax.yaxis.set_major_formatter(ticker.ScalarFormatter(useOffset=False))
+            ax.yaxis.get_major_formatter().set_scientific(False)
         
-        # 添加y轴的次要刻度
-        if len(all_stats) > 0:
-            all_disp_vals = []
-            for _, _, min_val, max_val, _, _ in all_stats:
-                all_disp_vals.extend([min_val, max_val])
-            disp_range = np.max(all_disp_vals) - np.min(all_disp_vals)
-            if disp_range > 0:
-                minor_interval = disp_range / 20
-                ax.yaxis.set_minor_locator(ticker.MultipleLocator(minor_interval))
-        
-        # 改进网格线样式
-        ax.grid(True, which='major', linestyle='-', linewidth=0.7, alpha=0.3, color='gray')
-        ax.grid(True, which='minor', linestyle='--', linewidth=0.5, alpha=0.2, color='gray')
-        
-        # 设置坐标轴边框样式
+        # 顶部和右边不显示刻度线及边框（与 accelerate/select.py 对齐）
+        ax.tick_params(top=False, right=False)
         ax.spines['top'].set_visible(True)
         ax.spines['right'].set_visible(True)
         ax.spines['top'].set_color('gray')
@@ -456,33 +419,10 @@ def plot_displacement_data(data_dict: Dict[str, np.ndarray],
         ax.spines['bottom'].set_color('black')
         ax.spines['left'].set_color('black')
         
+        
         # 添加图例
         ax.legend(legend_labels, loc='upper right', framealpha=0.9, edgecolor='gray',
-                 frameon=True, fancybox=False, shadow=False)
-        
-        # 添加统计信息框
-        if len(all_stats) > 0:
-            stats_text = 'Statistics:\n'
-            for stat_item in all_stats:
-                if has_multiple_detectors:
-                    det_num, n, min_val, max_val, mean_val, std_val = stat_item
-                    stats_text += (f'Det {det_num}: N={n}, '
-                                 f'Mean={mean_val:.2f} μm, '
-                                 f'Std={std_val:.2f} μm\n')
-                else:
-                    disp_name, n, min_val, max_val, mean_val, std_val = stat_item
-                    stats_text += (f'N={n}, '
-                                 f'Mean={mean_val:.2f} μm, '
-                                 f'Std={std_val:.2f} μm\n')
-            stats_text = stats_text.rstrip('\n')
-            
-            ax.text(0.98, 0.02, stats_text, transform=ax.transAxes,
-                   verticalalignment='bottom',
-                   horizontalalignment='right',
-                   bbox=dict(boxstyle='round,pad=0.5', facecolor='white',
-                           edgecolor='gray', alpha=0.8, linewidth=0.8),
-                   fontsize=9,
-                   family='monospace')
+                 frameon=True, fancybox=False, shadow=False, fontsize=12)
     
     plt.tight_layout()
     
@@ -520,7 +460,7 @@ if __name__ == '__main__':
                                                     detector_num=[1, 2, 3, 4, 5],
                                                     start_date='2025-05-28',
                                                     end_date='2025-06-10',
-                                                    downsample_factor=100)  # 降采样，每隔100个点读取1个
+                                                    downsample_factor=1000)  # 降采样，每隔100个点读取1个
         if data_multi:
             print(f'\n筛选结果包含以下列: {list(data_multi.keys())}')
             print(f'数据点数量: {len(data_multi["datetime"])}')
