@@ -634,10 +634,10 @@ def _test_umap_with_selected_features(
         1.0,  # 2  ch0_ch0pedt_mean        ：时间窗内基线平均，抑制慢漂移     没那么重要
         1.0,  # 3  ch0_ch0ped_var          ：基线方差，反映噪声水平          没那么重要
         1.0,  # 4  ch0_ch0pedt_var         ：时间相关的基线方差
-        1.0,  # 5  ch0_tmax_ch0            ：峰位置，区分波形时间结构
+        2.0,  # 5  ch0_tmax_ch0            ：峰位置，区分波形时间结构
         1.0,  # 6  ch0_ch0ped_rms          ：基线 RMS
         1.0,  # 7  ch0_ch0pedt_rms         ：时间窗内 RMS
-        2.0,  # 8  ch3_tanh_p0             ：快放脉冲幅度
+        1.0,  # 8  ch3_tanh_p0             ：快放脉冲幅度
         1.0,  # 9  ch3_tanh_p1             ：时间尺度/上升沿相关
         1.0,  # 10 ch3_tanh_p2             ：形状参数
         1.0,  # 11 ch3_tanh_p3             ：形状/平顶相关
@@ -755,6 +755,38 @@ def cut_ch5_self_trigger(max_ch5: np.ndarray, rt_threshold: float = 6000.0) -> n
     """
     return max_ch5 <= rt_threshold
 
+def cut_act(
+    max_ch4: np.ndarray,
+    tmax_ch4: np.ndarray,
+    trigger_threshold: float = 7060.0,
+    t_ge_us: float = 40.0,
+    sampling_interval_ns: float = 4.0,
+    dt_min_us: float = 1.0,
+    dt_max_us: float = 16.0,) -> np.ndarray:
+    """
+    ACT cut：
+    - 对 NaI 过阈事件 (max_ch4 >= trigger_threshold)，选取 Δt 非 [dt_min_us, dt_max_us] μs 的事例（反符合）；
+    - 对 NaI 未过阈事件，视为“非 ACV 约束”，一律保留。
+    参考 acv.py：Δt = t_Ge - t_CH4，t_CH4(μs) = tmax_ch4 * sampling_interval_ns * 1e-3。
+    输入: max_ch4, tmax_ch4
+    输出: bool 掩码（True = 通过 ACT cut 的事例）
+    """
+    n = max_ch4.shape[0]
+    tmax_ch4 = np.asarray(tmax_ch4, dtype=np.float64)[:n]
+    max_ch4 = np.asarray(max_ch4, dtype=np.float64)[:n]
+    # NaI 是否过阈
+    nai_ok = max_ch4 >= trigger_threshold
+    t_ch4_us = tmax_ch4 * sampling_interval_ns * 1e-3
+    delta_t_us = t_ge_us - t_ch4_us
+    # 对 NaI 过阈事件：ACT = Δt 非 [dt_min_us, dt_max_us] 范围
+    act_mask = (delta_t_us < dt_min_us) | (delta_t_us > dt_max_us)
+    # 最终通过条件：
+    # - NaI 未过阈（nai_ok == False）：全部保留；
+    # - NaI 过阈（nai_ok == True）：要求满足 act_mask。
+    return (~nai_ok) | (nai_ok & act_mask)
+
+
+
 def main() -> None:
     """
     简单入口：
@@ -809,6 +841,8 @@ def main() -> None:
         idx_ch0_max = feature_names_ref.index("ch0_max_ch0")
         idx_ch5_max = feature_names_ref.index("ch5_max_ch5")
         idx_ch0_min = feature_names_ref.index("ch0_ch0_min")
+        idx_ch4_max = feature_names_ref.index("ch4_max_ch4")
+        idx_ch4_tmax = feature_names_ref.index("ch4_tmax_ch4")
     except ValueError as e:
         raise RuntimeError(
             "在特征列表中未找到 ch0_max_ch0 / ch5_max_ch5 / ch0_ch0_min 之一，"
@@ -818,13 +852,15 @@ def main() -> None:
     ch0_max_all = X[:, idx_ch0_max]
     ch5_max_all = X[:, idx_ch5_max]
     ch0_min_all = X[:, idx_ch0_min]
+    max_ch4_all = X[:, idx_ch4_max]
+    tmax_ch4_all = X[:, idx_ch4_tmax]
 
     # 分别应用三个基础 cut
     m_ch0_min = cut_ch0_min_positive(ch0_min_all)
     m_ch0_max = cut_ch0_max_saturation(ch0_max_all)
     m_ch5_rt = cut_ch5_self_trigger(ch5_max_all)
-    # 三个基础 cut 的合并掩码
-    mask_physical = m_ch0_min & m_ch0_max & m_ch5_rt
+    m_act = cut_act(max_ch4_all, tmax_ch4_all)
+    mask_physical = m_ch0_min & m_ch0_max & m_ch5_rt & m_act
 
     n_kept = int(mask_physical.sum())
     print(f"根据 CH0/CH5 条件筛选后剩余事件数: {n_kept} / {n_total_events}")
