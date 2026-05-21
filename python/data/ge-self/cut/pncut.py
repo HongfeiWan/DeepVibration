@@ -31,8 +31,7 @@ ArrayLike = Union[np.ndarray]
 def _compute_max_in_window(
     waveforms: np.ndarray,
     ch_idx: int,
-    max_window: Optional[Union[slice, Tuple[int, int]]] = None,
-) -> np.ndarray:
+    max_window: Optional[Union[slice, Tuple[int, int]]] = None,) -> np.ndarray:
     """
     在给定时间窗上计算某一通道每个事件的 **最大值**。
 
@@ -90,13 +89,11 @@ def _compute_max_in_window(
 
     return amaxs
 
-
 def _fit_cut_line(
     max_ch0: np.ndarray,
     max_ch1: np.ndarray,
     method: str = "quantile",
-    quantile: float = 0.05,
-) -> Tuple[float, float]:
+    quantile: float = 0.05,) -> Tuple[float, float]:
     """
     拟合紧贴噪声分布的 cut line（直线）。
 
@@ -159,7 +156,6 @@ def _fit_cut_line(
     else:
         raise ValueError(f"不支持的拟合方法: {method}，支持: 'quantile', 'linear'")
 
-
 def pncut_ch0_ch1_from_act(
     phys_waveforms: np.ndarray,
     energy: np.ndarray,
@@ -169,8 +165,7 @@ def pncut_ch0_ch1_from_act(
     cut_method: str = "quantile",
     quantile: float = 0.05,
     cut_side: str = "below",
-    energy_bins: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
+    energy_bins: Optional[np.ndarray] = None,) -> Tuple[np.ndarray, Dict[str, np.ndarray]]:
     """
     使用 ACT 物理事例，对两路主放（CH0/CH1）的最大值做 PNcut。
 
@@ -282,7 +277,6 @@ def pncut_ch0_ch1_from_act(
 
     return keep_mask, stats
 
-
 __all__ = [
     "pncut_ch0_ch1_from_act",
     "_compute_max_in_window",
@@ -381,8 +375,8 @@ if __name__ == "__main__":
         print(f"总共使用 {n_runs_used} 个 run，汇总事件数: {max_ch0_all.size}")
 
         # 在指定范围内做快速线性拟合：
-        #   6000 <= CH0max <= 12000 且 CH1max > 3000
-        print("\n在 6000 <= CH0max <= 12000 且 CH1max > 3000 条件下进行快速线性拟合...")
+        #   4000 <= CH0max <= 14000 且 CH1max > 3000
+        print("\n在 4000 <= CH0max <= 14000 且 CH1max > 3000 条件下进行快速线性拟合...")
         mask_fit = (
             (max_ch0_all >= 6000.0) & (max_ch0_all <= 12000.0) &
             (max_ch1_all > 3000.0)
@@ -421,6 +415,18 @@ if __name__ == "__main__":
             x_plot = max_ch0_all
             y_plot = max_ch1_all
 
+        # 仅用于可视化：隐藏偏离拟合直线超过 3σ 的事件点
+        if sigma > 0.0:
+            y_plot_pred = a * x_plot + b
+            mask_plot_3sigma = np.abs(y_plot - y_plot_pred) <= (3.0 * sigma)
+            n_hidden = int((~mask_plot_3sigma).sum())
+            if n_hidden > 0:
+                print(f"可视化隐藏 3σ 以外事件点: {n_hidden} / {x_plot.size}")
+            x_plot = x_plot[mask_plot_3sigma]
+            y_plot = y_plot[mask_plot_3sigma]
+        else:
+            print("σ=0，跳过 3σ 可视化隐藏。")
+
         # 1. 绘制全局 max CH0 vs max CH1 散点图，并叠加拟合直线
         print("\n正在绘制全局图形...")
         fig, ax = plt.subplots(1, 1, figsize=(10, 6))
@@ -428,31 +434,20 @@ if __name__ == "__main__":
         ax.scatter(
             x_plot, y_plot,
             s=3, alpha=0.4, c="blue", edgecolors="none",
-            label="Events (from parameters)",
+            label="Events",
         )
 
         # 在全局 x 范围上画出拟合直线及其平行的 ±σ 带
         x_line = np.linspace(x_plot.min(), x_plot.max(), 200)
         y_line = a * x_line + b
-        ax.plot(x_line, y_line, "r-", lw=2, alpha=0.8, label="Linear fit (range-filtered)")
+        ax.plot(x_line, y_line, "r-", lw=9, alpha=0.4, label="Linear fit (range-filtered)")
 
-        if sigma > 0.0:
-            y_upper = y_line + 2*sigma
-            y_lower = y_line - 2*sigma
-            ax.fill_between(
-                x_line,
-                y_lower,
-                y_upper,
-                color="red",
-                alpha=0.15,
-                label="±2σ band (parallel to line)",
-            )
-
-        ax.set_xlabel("CH0 Max (ADC counts)", fontsize=12)
-        ax.set_ylabel("CH1 Max (ADC counts)", fontsize=12)
-        ax.set_title(f"CH0 Max vs CH1 Max\nTotal: {len(max_ch0_all)} events", fontsize=11)
-        ax.legend(loc="upper left", fontsize=9)
-        ax.grid(True, alpha=0.3)
+        ax.set_xlabel("CH0 Max (ADC counts)", fontsize=16)
+        ax.set_ylabel("CH1 Max (ADC counts)", fontsize=16)
+        ax.tick_params(axis="both", which="major", labelsize=12)
+        ax.legend(loc="upper left", fontsize=12)
+        ax.set_xlim(1000,16382)
+        ax.set_ylim(1000,16382)
 
         plt.tight_layout()
         plt.show()

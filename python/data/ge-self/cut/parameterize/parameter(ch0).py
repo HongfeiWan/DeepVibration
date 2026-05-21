@@ -59,20 +59,6 @@ spec_ls.loader.exec_module(lsmpncut_module)
 
 fit_single_line_in_range = lsmpncut_module.fit_single_line_in_range
 
-# 与 python/data/inhibit/select.py 一致的绘图风格
-_FIGSIZE_MAIN = (7.0, 4.5)
-_FS_AXIS_LABEL = 20
-_FS_TICK = 16
-_FS_LEGEND = 16
-_FS_TITLE = 18
-
-
-def _apply_plotstyle_rc() -> None:
-    plt.rcParams.update({
-        "font.family": "sans-serif",
-        "font.sans-serif": ["Arial"],
-    })
-
 
 def compute_eight_params(
     waveform: np.ndarray,
@@ -276,12 +262,15 @@ def _visualize_single_event_by_index(
 
     y_text_offset = (y_max - y_min) * 0.1
 
-    _apply_plotstyle_rc()
+    plt.rcParams.update({
+        "font.family": "serif",
+        "font.serif": ["Times New Roman"],
+    })
 
     # 主图：波形 + 7 维参数相关标注
-    fig, ax = plt.subplots(figsize=_FIGSIZE_MAIN)
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-    ax.plot(time_axis_us, waveform, color="C0", linewidth=2)
+    ax.plot(time_axis_us, waveform, color="C0", linewidth=1)
 
     # Ped 区域
     ax.axvspan(t_ped_start, t_ped_end, color="tab:green", alpha=0.15)
@@ -290,13 +279,13 @@ def _visualize_single_event_by_index(
         [mu_ped, mu_ped],
         color="tab:green",
         linestyle="--",
-        linewidth=2.0,
+        linewidth=0.8,
         alpha=0.8,
     )
     ax.text(
         time_axis_us[0], mu_ped + y_text_offset,
-        f"ped",
-        color="tab:green", fontsize=_FS_LEGEND, va="bottom", ha="left",
+        f"μ(ped)={mu_ped:.1f} σ={sigma_ped:.2f}",
+        color="tab:green", fontsize=12, va="bottom", ha="left",
     )
 
     # Pedt 区域
@@ -306,58 +295,67 @@ def _visualize_single_event_by_index(
         [mu_pedt, mu_pedt],
         color="tab:orange",
         linestyle="--",
-        linewidth=2.0,
+        linewidth=0.8,
         alpha=0.8,
     )
     ax.text(
         time_axis_us[-1], mu_pedt - y_text_offset,
-        f"pedt",
-        color="tab:orange", fontsize=_FS_LEGEND, va="top", ha="right",
+        f"μ(pedt)={mu_pedt:.1f} σ={sigma_pedt:.2f}",
+        color="tab:orange", fontsize=12, va="top", ha="right",
     )
 
     # Amax / Tmax
     ax.scatter([tmax_us], [amax], color="red", s=40, zorder=5)
-    ax.plot([tmax_us, tmax_us], [y_min, amax], color="red", linestyle="--", linewidth=2.0, alpha=0.8)
-    ax.plot([time_axis_us[0], tmax_us], [amax, amax], color="red", linestyle="--", linewidth=2.0, alpha=0.8)
-    
-    ax.text(time_axis_us[0]+5, amax, "Amax", color="red", fontsize=_FS_LEGEND, va="bottom", ha="left")
-    ax.text(tmax_us, y_min+30, "Tmax", color="red", fontsize=_FS_LEGEND, va="top", ha="left")
+    ax.plot([tmax_us, tmax_us], [y_min, amax], color="red", linestyle="--", linewidth=0.8, alpha=0.8)
+    ax.plot([time_axis_us[0], tmax_us], [amax, amax], color="red", linestyle="--", linewidth=0.8, alpha=0.8)
+    ax.text(time_axis_us[0], amax, "Amax", color="red", fontsize=14, va="bottom", ha="left")
+    ax.text(tmax_us, y_min, f"Tmax={tmax_us:.3f}µs", color="red", fontsize=14, va="top", ha="left")
 
-    ax.set_xlabel("Time (µs)", fontsize=_FS_AXIS_LABEL)
-    ax.set_ylabel("Amplitude (ADC)", fontsize=_FS_AXIS_LABEL)
-    ax.tick_params(axis="both", which="major", labelsize=_FS_TICK)
+    ax.set_xlabel("Time (µs)", fontsize=18, fontweight="bold")
+    ax.set_ylabel("Amplitude (ADC)", fontsize=18, fontweight="bold")
     ax.set_ylim(y_min, y_max)
     ax.grid(True, alpha=0.3)
+    for tick in ax.xaxis.get_major_ticks():
+        tick.label1.set_fontweight("bold")
+    for tick in ax.yaxis.get_major_ticks():
+        tick.label1.set_fontweight("bold")
 
     filename = os.path.basename(ch0_3_file)
+    ax.set_title(
+        f"CH0 8-Parameter: Amax, μ(ped), μ(pedt), σ(ped), σ(pedt), Tmax, RMS_ped, RMS_pedt\n"
+        f"{filename}  |  Event #{event_index}",
+        fontsize=12,
+        fontweight="bold",
+    )
 
     plt.tight_layout()
 
     # 基线放大图：Ped（含 RMS_ped）、Pedt
-    fig_baseline, (ax_ped, ax_pedt) = plt.subplots(1, 2, figsize=(10.0, 4.5))
+    fig_baseline, (ax_ped, ax_pedt) = plt.subplots(1, 2, figsize=(12, 5))
     fig_baseline.suptitle(
         f"Baseline: μ(ped), σ(ped), RMS_ped | μ(pedt), σ(pedt), RMS_pedt  |  {filename}  Event #{event_index}",
-        fontsize=_FS_TITLE,
+        fontsize=12,
+        fontweight="bold",
     )
 
     t_ped_zoom = time_axis_us[:samples_baseline]
     w_ped_zoom = waveform[:samples_baseline]
-    ax_ped.plot(t_ped_zoom, w_ped_zoom, color="C0", linewidth=2)
+    ax_ped.plot(t_ped_zoom, w_ped_zoom, color="C0", linewidth=1)
     k_ped, b_ped = np.polyfit(t_ped_zoom, w_ped_zoom, 1)
     ped_fit = k_ped * t_ped_zoom + b_ped
-    ax_ped.plot(t_ped_zoom, ped_fit, color="tab:green", linestyle="--", linewidth=2.0, alpha=0.9)
-    ax_ped.set_xlabel("Time (µs)", fontsize=_FS_AXIS_LABEL)
-    ax_ped.set_ylabel("Amplitude (ADC)", fontsize=_FS_AXIS_LABEL)
+    ax_ped.plot(t_ped_zoom, ped_fit, color="tab:green", linestyle="--", linewidth=1.2, alpha=0.9)
+    ax_ped.set_xlabel("Time (µs)", fontsize=14, fontweight="bold")
+    ax_ped.set_ylabel("Amplitude (ADC)", fontsize=14, fontweight="bold")
     ax_ped.set_title(
-        f"Ped",
-        fontsize=_FS_TITLE,
+        f"Ped: μ={mu_ped:.2f}  σ={sigma_ped:.2f}  RMS={rms_ped:.3f}",
+        fontsize=12,
+        fontweight="bold",
     )
-    ax_ped.tick_params(axis="both", which="major", labelsize=_FS_TICK)
     ax_ped.grid(True, alpha=0.3)
 
     div_ped = make_axes_locatable(ax_ped)
     ax_hist_ped = div_ped.append_axes("right", size="25%", pad=0.15, sharey=ax_ped)
-    ax_hist_ped.tick_params(axis="y", labelleft=False, labelsize=_FS_TICK)
+    ax_hist_ped.tick_params(axis="y", labelleft=False)
     ax_hist_ped.hist(
         w_ped_zoom,
         bins=min(20, max(5, samples_baseline // 2)),
@@ -366,26 +364,26 @@ def _visualize_single_event_by_index(
         alpha=0.6,
         edgecolor="tab:green",
     )
-    ax_hist_ped.axhline(mu_ped, color="tab:green", linestyle="--", linewidth=2.0, alpha=0.9)
+    ax_hist_ped.axhline(mu_ped, color="tab:green", linestyle="--", linewidth=1, alpha=0.9)
 
     t_pedt_zoom = time_axis_us[-samples_baseline:]
     w_pedt_zoom = waveform[-samples_baseline:]
-    ax_pedt.plot(t_pedt_zoom, w_pedt_zoom, color="C0", linewidth=2.0)
+    ax_pedt.plot(t_pedt_zoom, w_pedt_zoom, color="C0", linewidth=1)
     k_pedt, b_pedt = np.polyfit(t_pedt_zoom, w_pedt_zoom, 1)
     pedt_fit = k_pedt * t_pedt_zoom + b_pedt
-    ax_pedt.plot(t_pedt_zoom, pedt_fit, color="tab:orange", linestyle="--", linewidth=2.0, alpha=0.9)
-    ax_pedt.set_xlabel("Time (µs)", fontsize=_FS_AXIS_LABEL)
-    ax_pedt.set_ylabel("Amplitude (ADC)", fontsize=_FS_AXIS_LABEL)
+    ax_pedt.plot(t_pedt_zoom, pedt_fit, color="tab:orange", linestyle="--", linewidth=1.2, alpha=0.9)
+    ax_pedt.set_xlabel("Time (µs)", fontsize=14, fontweight="bold")
+    ax_pedt.set_ylabel("Amplitude (ADC)", fontsize=14, fontweight="bold")
     ax_pedt.set_title(
-        f"Pedt",
-        fontsize=_FS_TITLE,
+        f"Pedt: μ={mu_pedt:.2f}  σ={sigma_pedt:.2f}  RMS={rms_pedt:.3f}",
+        fontsize=12,
+        fontweight="bold",
     )
-    ax_pedt.tick_params(axis="both", which="major", labelsize=_FS_TICK)
     ax_pedt.grid(True, alpha=0.3)
 
     div_pedt = make_axes_locatable(ax_pedt)
     ax_hist_pedt = div_pedt.append_axes("right", size="25%", pad=0.15, sharey=ax_pedt)
-    ax_hist_pedt.tick_params(axis="y", labelleft=False, labelsize=_FS_TICK)
+    ax_hist_pedt.tick_params(axis="y", labelleft=False)
     ax_hist_pedt.hist(
         w_pedt_zoom,
         bins=min(20, max(5, samples_baseline // 2)),
@@ -394,9 +392,8 @@ def _visualize_single_event_by_index(
         alpha=0.6,
         edgecolor="tab:orange",
     )
-    ax_hist_pedt.axhline(mu_pedt, color="tab:orange", linestyle="--", linewidth=2.0, alpha=0.9)
+    ax_hist_pedt.axhline(mu_pedt, color="tab:orange", linestyle="--", linewidth=1, alpha=0.9)
 
-    ax.set_xlim(0, 120)
     plt.tight_layout()
 
     if save_path is None:

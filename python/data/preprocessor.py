@@ -53,7 +53,8 @@ MAX_WINDOWS = 30000     # 时间窗 120μs （30000个时间点 x 4ns）
 
 def wait_for_memory_below(
     max_used_percent: float = 95.0,
-    check_interval_sec: float = 5.0,) -> None:
+    check_interval_sec: float = 5.0,
+) -> None:
     """
     简单的内存守门函数：
     - 当当前进程所在机器的内存占用超过 max_used_percent 时，不继续往下读大文件，
@@ -769,6 +770,7 @@ def main():
     print(f'总耗时: {elapsed_time:.2f} 秒 ({elapsed_time/60:.2f} 分钟)')
     print(f'成功: {success_count} 个任务')
     print(f'失败: {fail_count} 个任务')
+
 
 if __name__ == '__main__':
     main()

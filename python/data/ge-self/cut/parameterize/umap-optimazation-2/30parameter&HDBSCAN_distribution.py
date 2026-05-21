@@ -19,6 +19,7 @@ from typing import Dict, List, Tuple
 import h5py
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.ticker import FuncFormatter, MaxNLocator, NullFormatter, ScalarFormatter
 
 from pathlib import Path
 
@@ -55,12 +56,31 @@ CH_PARAM_DIRS: Dict[int, Path] = {
 }
 
 # UMAP+HDBSCAN 结果缓存默认保存路径（事件映射 HDF5）
+# CLUSTER_CACHE_PATH = (
+#     PROJECT_ROOT
+#     / "data"
+#     / "hdf5"
+#     / "ge_30param_umap_hdbscan_eventmap.h5"
+# )
+
+# CLUSTER_CACHE_PATH = (
+#     PROJECT_ROOT
+#     / "data"
+#     / "hdf5"
+#     / "ge_30param_umap_hdbscan_eventmap_step2_cluster1.h5"
+# )
+
+# 与 tab20 簇颜色区分明显的噪声点/噪声曲线颜色（原 lightgray 易与背景混淆）
+NOISE_COLOR = "#b45f06"
+NOISE_COLOR = "#D3D3D3"
+
 CLUSTER_CACHE_PATH = (
     PROJECT_ROOT
     / "data"
     / "hdf5"
-    / "ge_30param_umap_hdbscan_eventmap.h5"
+    / "ge_30param_umap_hdbscan_eventmap_step2_cluster1_step_3_cluster2.h5"
 )
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -143,13 +163,13 @@ def _plot_umap_embedding_by_cluster(path: Path) -> None:
         mask = labels == lab
         if not np.any(mask):
             continue
-        color = "lightgray" if lab == -1 else cmap((ci % 20 + 0.5) / 20)
+        color = NOISE_COLOR if lab == -1 else cmap((ci % 20 + 0.5) / 20)
         label = "Noise" if lab == -1 else f"Cluster {lab}"
         ax.scatter(
             embedding[mask, 0],
             embedding[mask, 1],
             s=5,
-            alpha=0.7 if lab != -1 else 0.4,
+            alpha=0.7 if lab != -1 else 0.55,
             color=color,
             label=label,
             edgecolors="none",
@@ -158,8 +178,7 @@ def _plot_umap_embedding_by_cluster(path: Path) -> None:
     ax.set_xlabel("UMAP 1", fontsize=12)
     ax.set_ylabel("UMAP 2", fontsize=12)
     ax.set_title("UMAP embedding by cluster", fontsize=14)
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc="best", fontsize=10, frameon=False)
+    ax.legend(loc="upper left", fontsize=10, frameon=False)
     fig.tight_layout()
     plt.show()
 
@@ -259,8 +278,7 @@ def _plot_feature_distributions_by_cluster(
     X_all: np.ndarray,
     feature_names: List[str],
     labels: np.ndarray,
-    max_features: int | None = None,
-) -> None:
+    max_features: int | None = None,) -> None:
     """
     对所有可用特征（或指定前 max_features 个特征），画出“按 cluster 分组”的 1D 分布。
     按通道分组：CH0–CH5 各自一个窗口，每个窗口内部为该通道所有参数的子图。
@@ -273,6 +291,102 @@ def _plot_feature_distributions_by_cluster(
         "font.family": "serif",
         "font.serif": ["Times New Roman"],
     })
+
+    # 统一字体大小（分布图）
+    LABEL_FS = 14
+    TITLE_FS = 14
+    TICK_FS = 12
+    LEGEND_FS = 11
+    SUPTITLE_FS = 16
+
+    # 统一 X 轴物理意义（用户需求）
+    X_PHYS_LABEL = "FADC COUNT"
+
+    def _bin_edges_for_feature(feat_name: str, data_all: np.ndarray, use_log_x: bool) -> np.ndarray | int:
+        """
+        为特定特征生成更合适的分箱。
+        - 对包含 'var' 的特征：优先使用 Freedman–Diaconis 自适应分箱（限制最大箱数）。
+        - 其它特征：使用一个适中的固定箱数。
+        - 对 log-x 特征：在 log 空间用 FD 估算箱数，然后用 logspace 给出边界。
+        """
+        name_lower = feat_name.lower()
+        if "var" not in name_lower:
+            return 200
+
+        if use_log_x:
+            x = data_all[data_all > 0]
+            if x.size < 10:
+                return 200
+            lx = np.log10(x)
+            edges_l = np.histogram_bin_edges(lx, bins="fd")
+            n_bins = int(np.clip(edges_l.size - 1, 50, 400))
+            xmin = float(np.min(x))
+            xmax = float(np.max(x))
+            if not np.isfinite(xmin) or not np.isfinite(xmax) or xmin <= 0 or xmax <= xmin:
+                return 200
+            return np.logspace(np.log10(xmin), np.log10(xmax), n_bins + 1)
+
+        x = data_all[np.isfinite(data_all)]
+        if x.size < 10:
+            return 200
+        edges = np.histogram_bin_edges(x, bins="fd")
+        n_bins = int(np.clip(edges.size - 1, 50, 400))
+        # 重新用等宽边界，避免 FD 边界过密/不稳定导致观感不一致
+        xmin = float(np.min(x))
+        xmax = float(np.max(x))
+        if not np.isfinite(xmin) or not np.isfinite(xmax) or xmax <= xmin:
+            return 200
+        return np.linspace(xmin, xmax, n_bins + 1)
+
+    def _format_linear_x_ticks_with_tail_magnitude(ax: plt.Axes, data_all: np.ndarray) -> None:
+        """
+        在线性 x 轴下，如果数据整体处于同一量级，则只在刻度上显示缩放后的数字，
+        并把 ×10^k 统一放到坐标轴末尾，减少标签重叠。
+        """
+        data_all = data_all[np.isfinite(data_all)]
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=4, prune="both"))
+        ax.xaxis.set_minor_formatter(NullFormatter())
+
+        data_abs = np.abs(data_all)
+        nonzero = data_abs[data_abs > 0]
+        same_order_of_magnitude = False
+        max_abs = 0.0
+        if nonzero.size >= 2:
+            min_abs = float(np.min(nonzero))
+            max_abs = float(np.max(nonzero))
+            if np.isfinite(min_abs) and np.isfinite(max_abs) and min_abs > 0 and max_abs > 0:
+                oom_min = int(np.floor(np.log10(min_abs)))
+                oom_max = int(np.floor(np.log10(max_abs)))
+                same_order_of_magnitude = (oom_min == oom_max)
+
+        ax.xaxis.get_offset_text().set_visible(False)
+        for txt in list(ax.texts):
+            if getattr(txt, "_is_manual_xoffset", False):
+                txt.remove()
+
+        if same_order_of_magnitude:
+            k = int(np.floor(np.log10(max_abs)))
+            scale = float(10.0 ** k)
+
+            def _fmt_tick(x: float, _pos: int) -> str:
+                return f"{x / scale:g}"
+
+            ax.xaxis.set_major_formatter(FuncFormatter(_fmt_tick))
+            t = ax.text(
+                1.0,
+                -0.18,
+                rf"$\times 10^{{{k}}}$",
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                fontsize=10,
+            )
+            setattr(t, "_is_manual_xoffset", True)
+        else:
+            sf_plain = ScalarFormatter(useMathText=True)
+            sf_plain.set_scientific(False)
+            sf_plain.set_useOffset(False)
+            ax.xaxis.set_major_formatter(sf_plain)
 
     # 预先构建每个通道的特征索引列表
     channel_to_indices: Dict[int, List[int]] = {ch: [] for ch in range(6)}
@@ -305,40 +419,59 @@ def _plot_feature_distributions_by_cluster(
             feat_name = feature_names[feat_idx]
             ax = axes[local_idx]
 
-            # CH2/CH3 仍使用 log-log 坐标
-            use_log_xy = feat_name.startswith("ch2_") or feat_name.startswith("ch3_")
+            # CH2 保持 log-log；CH3 改为线性 x，并在同量级时将 ×10^k 放到轴末尾。
+            use_log_x = feat_name.startswith("ch2_")
+            use_log_y = feat_name.startswith("ch2_") or feat_name.startswith("ch3_")
+
+            # 为该特征准备统一分箱（跨 cluster 保持一致）
+            data_all_feat = X_all[:, feat_idx]
+            if use_log_x:
+                data_all_feat = data_all_feat[data_all_feat > 0]
+            else:
+                data_all_feat = data_all_feat[np.isfinite(data_all_feat)]
+            bins = _bin_edges_for_feature(feat_name, data_all_feat, use_log_x)
 
             for ci, lab in enumerate(unique_labels):
                 mask = labels == lab
                 if not np.any(mask):
                     continue
                 data = X_all[mask, feat_idx]
-                if use_log_xy:
+                if use_log_x:
                     data = data[data > 0]
                     if data.size == 0:
                         continue
-                color = "lightgray" if lab == -1 else cmap((ci % 20 + 0.5) / 20)
+                else:
+                    data = data[np.isfinite(data)]
+                    if data.size == 0:
+                        continue
+                color = NOISE_COLOR if lab == -1 else cmap((ci % 20 + 0.5) / 20)
                 label = "Noise" if lab == -1 else f"Cluster {lab}"
 
                 ax.hist(
                     data,
-                    bins=500,
+                    bins=bins,
                     histtype="step",
                     linewidth=1.0,
-                    alpha=0.9 if lab != -1 else 0.6,
+                    alpha=0.9 if lab != -1 else 0.75,
                     color=color,
                     label=label,
                     density=True,
                 )
 
-            if use_log_xy:
+            if use_log_x:
                 ax.set_xscale("log")
+            else:
+                _format_linear_x_ticks_with_tail_magnitude(ax, data_all_feat)
+            if use_log_y:
                 ax.set_yscale("log")
 
-            ax.set_xlabel(feat_name, fontsize=10)
-            ax.set_ylabel("Density", fontsize=10)
-            ax.set_title(feat_name, fontsize=11)
-            ax.grid(True, alpha=0.3)
+            ax.set_xlabel(X_PHYS_LABEL, fontsize=LABEL_FS)
+            ax.set_ylabel("Density", fontsize=LABEL_FS)
+            ax.set_title(feat_name, fontsize=TITLE_FS)
+            ax.tick_params(axis="both", which="both", labelsize=TICK_FS)
+            ax.tick_params(axis="x", labelrotation=0)
+            for t in ax.get_xticklabels():
+                t.set_ha("right")
 
         # 隐藏多余子图
         for j in range(n_features, len(axes)):
@@ -356,12 +489,12 @@ def _plot_feature_distributions_by_cluster(
             axes[0].legend(
                 handles,
                 labels_legend,
-                loc="upper right",
-                fontsize=10,
+                loc="upper left",
+                fontsize=LEGEND_FS,
                 frameon=False,
             )
 
-        fig.suptitle(f"CH{ch} feature distributions by cluster", fontsize=14)
+        fig.suptitle(f"CH{ch} feature distributions by cluster", fontsize=SUPTITLE_FS)
         fig.tight_layout()
         plt.show()
 

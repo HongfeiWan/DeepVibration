@@ -106,7 +106,7 @@ def analyze_ch0_max_vs_delta_t(
         # 最多处理 50 个文件对，避免一次性读入过多数据
         if len(paired_files) > 50:
             print(f"找到 {len(paired_files)} 个参数文件对，仅使用前 50 个。")
-            paired_files = paired_files[:50]
+            paired_files = paired_files[:]
     else:
         # 用户可以传入一个 CH0_parameters 文件路径，或者任意包含该文件名的路径
         if not os.path.exists(h5_file):
@@ -221,16 +221,16 @@ def analyze_ch0_max_vs_delta_t(
 
     ax.set_xlabel("CH0 maximum amplitude (FADC)", fontsize=16)
     ax.set_ylabel("Δt = t_Ge - t_NaI (μs)", fontsize=16)
-    ax.set_title("CH0 maximum amplitude vs NaI Δt", fontsize=18)
     ax.tick_params(axis="both", which="major", labelsize=12)
-    ax.set_xlim(0, 16382)
-
-    # 在 Δt = 1 μs 和 16 μs 处画两条参考横线
-    ax.axhline(1.0, color="red", linestyle="--", linewidth=1.5)
-    ax.axhline(16.0, color="green", linestyle="--", linewidth=1.5)
-
+    ax.set_xlim(1000, 16300)
+    ax.set_ylim(-1, 20)
     # 可根据需要打开网格
     # ax.grid(True, alpha=0.3)
+    ax.axhline(1.0, color="red", linestyle="--", linewidth=1.5)
+    ax.axhline(16.0, color="red", linestyle="--", linewidth=1.5)
+    # 标注两条红虚线对应的 y 值
+    ax.text(16300, 1.0 + 0.25, "Δt = 1.0", color="red", fontsize=12, va="bottom", ha="right")
+    ax.text(16300, 16.0 + 0.25, "Δt = 16.0", color="red", fontsize=12, va="bottom", ha="right")
 
     fig.tight_layout()
 

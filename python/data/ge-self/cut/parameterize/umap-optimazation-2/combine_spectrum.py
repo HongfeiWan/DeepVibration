@@ -36,7 +36,11 @@ ENERGY_B = -0.826976770117076
 
 # Spectrum normalization: Rate [counts/(keV*kg*day)]
 EXPOSURE_KG = 0.5
-EXPOSURE_DAYS = 20.0
+EXPOSURE_DAYS = 16.5
+
+# 能谱 bin 固定范围，与 acvcombine_spectrum 一一对应，便于效率修正
+E_MIN_BIN = 0.0
+E_MAX_BIN = 12.0
 
 
 def _project_root_from_script() -> Path:
@@ -58,8 +62,14 @@ PROJECT_ROOT = _project_root_from_script()
 DATA_ROOT = PROJECT_ROOT / "data" / "hdf5" / "raw_pulse"
 CH0_PARAM_DIR = DATA_ROOT / "CH0_parameters"
 CH1_PARAM_DIR = DATA_ROOT / "CH1_parameters"
+CH2_PARAM_DIR = DATA_ROOT / "CH2_parameters"
+CH3_PARAM_DIR = DATA_ROOT / "CH3_parameters"
 CH4_PARAM_DIR = DATA_ROOT / "CH4_parameters"
 CH5_PARAM_DIR = DATA_ROOT / "CH5_parameters"
+
+# bscut 上升时间阈值 (samples): ln(19)/p1 < BS_RISE_TIME_THRESHOLD
+LN_19 = np.log(19.0)
+BS_RISE_TIME_THRESHOLD = 0.8
 
 
 def _list_paired_param_files() -> List[Tuple[Path, Path]]:
@@ -98,22 +108,159 @@ def _list_paired_param_files() -> List[Tuple[Path, Path]]:
 
     return pairs
 
+def _list_paired_param_files_with_ch3() -> List[Tuple[Path, Path]]:
+    """与 _list_paired_param_files 相同，但额外要求 CH3_parameters 中存在对应文件。"""
+    base_pairs = _list_paired_param_files()
+    if not CH3_PARAM_DIR.exists():
+        return []
+    ch3_existing = {n for n in os.listdir(CH3_PARAM_DIR) if n.lower().endswith((".h5", ".hdf5"))}
+    return [(ch0, ch5) for ch0, ch5 in base_pairs if ch0.name in ch3_existing]
+
+def _list_paired_param_files_with_ch2_ch3() -> List[Tuple[Path, Path]]:
+    """与 _list_paired_param_files 相同，但额外要求 CH2/CH3_parameters 中均存在对应文件。"""
+    base_pairs = _list_paired_param_files()
+    if not CH2_PARAM_DIR.exists() or not CH3_PARAM_DIR.exists():
+        return []
+    ch2_existing = {n for n in os.listdir(CH2_PARAM_DIR) if n.lower().endswith((".h5", ".hdf5"))}
+    ch3_existing = {n for n in os.listdir(CH3_PARAM_DIR) if n.lower().endswith((".h5", ".hdf5"))}
+    return [(ch0, ch5) for ch0, ch5 in base_pairs if (ch0.name in ch2_existing and ch0.name in ch3_existing)]
+
+def _load_ch2_ch3_fit_quality_aligned(ch0_param_path: Path, n_events: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    从 CH2/CH3 参数文件读取拟合质量相关量，并与 n_events 对齐：
+        - ch2_n_fit_points
+        - ch3_n_fit_points
+        - ch2_tanh_p0
+        - ch3_tanh_p0
+    缺文件/缺数据集时返回默认值（n_fit_points=0, tanh_p0=NaN）。
+    """
+    ch2_n_fit_points = np.zeros(n_events, dtype=np.int32)
+    ch3_n_fit_points = np.zeros(n_events, dtype=np.int32)
+    ch2_tanh_p0 = np.full(n_events, np.nan, dtype=np.float64)
+    ch3_tanh_p0 = np.full(n_events, np.nan, dtype=np.float64)
+
+    ch2_path = CH2_PARAM_DIR / ch0_param_path.name
+    if ch2_path.is_file():
+        try:
+            with h5py.File(ch2_path, "r") as f:
+                if "n_fit_points" in f:
+                    n2 = np.asarray(f["n_fit_points"][...], dtype=np.int32)
+                    n = min(int(n2.shape[0]), n_events)
+                    if n > 0:
+                        ch2_n_fit_points[:n] = n2[:n]
+                if "tanh_p0" in f:
+                    p2 = np.asarray(f["tanh_p0"][...], dtype=np.float64)
+                    n = min(int(p2.shape[0]), n_events)
+                    if n > 0:
+                        ch2_tanh_p0[:n] = p2[:n]
+        except Exception:
+            pass
+
+    ch3_path = CH3_PARAM_DIR / ch0_param_path.name
+    if ch3_path.is_file():
+        try:
+            with h5py.File(ch3_path, "r") as f:
+                if "n_fit_points" in f:
+                    n3 = np.asarray(f["n_fit_points"][...], dtype=np.int32)
+                    n = min(int(n3.shape[0]), n_events)
+                    if n > 0:
+                        ch3_n_fit_points[:n] = n3[:n]
+                if "tanh_p0" in f:
+                    p3 = np.asarray(f["tanh_p0"][...], dtype=np.float64)
+                    n = min(int(p3.shape[0]), n_events)
+                    if n > 0:
+                        ch3_tanh_p0[:n] = p3[:n]
+        except Exception:
+            pass
+
+    return ch2_n_fit_points, ch3_n_fit_points, ch2_tanh_p0, ch3_tanh_p0
+
+def _load_ch3_ped_min_aligned(ch0_param_path: Path, n_events: int) -> tuple[np.ndarray, np.ndarray]:
+    """
+    从 CH3 参数文件读取 ch3ped_mean / min_ch3，并与 n_events 对齐。
+    缺文件/缺数据集时返回 NaN 数组，确保 cut_ch3ped_min 自动不通过。
+    """
+    ch3ped_mean = np.full(n_events, np.nan, dtype=np.float64)
+    min_ch3 = np.full(n_events, np.nan, dtype=np.float64)
+    ch3_path = CH3_PARAM_DIR / ch0_param_path.name
+    if not ch3_path.is_file():
+        return ch3ped_mean, min_ch3
+    try:
+        with h5py.File(ch3_path, "r") as f:
+            if "ch3ped_mean" in f:
+                x = np.asarray(f["ch3ped_mean"][...], dtype=np.float64)
+                n = min(int(x.shape[0]), n_events)
+                if n > 0:
+                    ch3ped_mean[:n] = x[:n]
+            if "min_ch3" in f:
+                y = np.asarray(f["min_ch3"][...], dtype=np.float64)
+                n = min(int(y.shape[0]), n_events)
+                if n > 0:
+                    min_ch3[:n] = y[:n]
+    except Exception:
+        pass
+    return ch3ped_mean, min_ch3
+
+def cut_fit_success(
+    ch2_n_fit_points: np.ndarray,
+    ch3_n_fit_points: np.ndarray,
+    ch2_tanh_p0: np.ndarray,
+    ch3_tanh_p0: np.ndarray,
+    bad_val: float = 1e6,) -> np.ndarray:
+    """
+    过滤 fit_ch2_ch3_parallel.py 中拟合失败/未参与拟合的事件。
+
+    判定规则（同时满足）：
+    - CH2 与 CH3 的 n_fit_points 都 > 0；
+    - CH2 与 CH3 的 tanh_p0 为有限值，且不等于异常值 bad_val（默认 1e6）。
+    """
+    ch2_n = np.asarray(ch2_n_fit_points, dtype=np.int32)
+    ch3_n = np.asarray(ch3_n_fit_points, dtype=np.int32)
+    ch2_p0 = np.asarray(ch2_tanh_p0, dtype=np.float64)
+    ch3_p0 = np.asarray(ch3_tanh_p0, dtype=np.float64)
+    n = min(ch2_n.shape[0], ch3_n.shape[0], ch2_p0.shape[0], ch3_p0.shape[0])
+    ch2_n = ch2_n[:n]
+    ch3_n = ch3_n[:n]
+    ch2_p0 = ch2_p0[:n]
+    ch3_p0 = ch3_p0[:n]
+    ok_npts = (ch2_n > 0) & (ch3_n > 0)
+    ok_ch2 = np.isfinite(ch2_p0) & (~np.isclose(ch2_p0, bad_val))
+    ok_ch3 = np.isfinite(ch3_p0) & (~np.isclose(ch3_p0, bad_val))
+    return ok_npts & ok_ch2 & ok_ch3
+
 def _load_basic_features_for_run(
     ch0_param_path: Path,
-    ch5_param_path: Path,) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ch5_param_path: Path,) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,]:
     """
     从单个 run 的 CH0/CH5/CH1/CH4 参数文件中读取基准特征（basic+acv.py 保持一致）。
     """
 
     with h5py.File(ch0_param_path, "r") as f_ch0:
-        if "max_ch0" not in f_ch0 or "ch0_min" not in f_ch0 or "ch0ped_mean" not in f_ch0:
+        if (
+            "max_ch0" not in f_ch0
+            or "ch0_min" not in f_ch0
+            or "ch0ped_mean" not in f_ch0
+            or "tmax_ch0" not in f_ch0
+        ):
             raise KeyError(
-                f"{ch0_param_path.name} 中缺少 max_ch0 / ch0_min / ch0ped_mean 数据集，"
+                f"{ch0_param_path.name} 中缺少 max_ch0 / ch0_min / ch0ped_mean / tmax_ch0 数据集，"
                 "请确认该文件由当前版本的 preprocessor.py 生成。"
             )
         max_ch0 = np.asarray(f_ch0["max_ch0"][...], dtype=np.float64)
         ch0_min = np.asarray(f_ch0["ch0_min"][...], dtype=np.float64)
         ch0_ped_mean = np.asarray(f_ch0["ch0ped_mean"][...], dtype=np.float64)
+        tmax_ch0 = np.asarray(f_ch0["tmax_ch0"][...], dtype=np.float64)
 
     with h5py.File(ch5_param_path, "r") as f_ch5:
         if "max_ch5" not in f_ch5:
@@ -125,14 +272,20 @@ def _load_basic_features_for_run(
 
     ch1_param_path = CH1_PARAM_DIR / ch0_param_path.name
     with h5py.File(ch1_param_path, "r") as f_ch1:
-        if "ch1ped_mean" not in f_ch1 or "max_ch1" not in f_ch1 or "ch1_min" not in f_ch1:
+        if (
+            "ch1ped_mean" not in f_ch1
+            or "max_ch1" not in f_ch1
+            or "ch1_min" not in f_ch1
+            or "tmax_ch1" not in f_ch1
+        ):
             raise KeyError(
-                f"{ch1_param_path.name} 中缺少 ch1ped_mean / max_ch1 / ch1_min 之一，"
+                f"{ch1_param_path.name} 中缺少 ch1ped_mean / max_ch1 / ch1_min / tmax_ch1 之一，"
                 "请确认该文件由当前版本的 preprocessor.py 生成。"
             )
         ch1_ped_mean = np.asarray(f_ch1["ch1ped_mean"][...], dtype=np.float64)
         max_ch1 = np.asarray(f_ch1["max_ch1"][...], dtype=np.float64)
         ch1_min = np.asarray(f_ch1["ch1_min"][...], dtype=np.float64)
+        tmax_ch1 = np.asarray(f_ch1["tmax_ch1"][...], dtype=np.float64)
 
     ch4_param_path = CH4_PARAM_DIR / ch0_param_path.name
     with h5py.File(ch4_param_path, "r") as f_ch4:
@@ -144,7 +297,7 @@ def _load_basic_features_for_run(
         max_ch4 = np.asarray(f_ch4["max_ch4"][...], dtype=np.float64)
         tmax_ch4 = np.asarray(f_ch4["tmax_ch4"][...], dtype=np.float64)
 
-    n0, nmin, n5, nped0, nped1, n1, nc1min, n4, nt4 = (
+    n0, nmin, n5, nped0, nped1, n1, nc1min, n4, nt4, nt0, nt1 = (
         max_ch0.shape[0],
         ch0_min.shape[0],
         max_ch5.shape[0],
@@ -154,10 +307,12 @@ def _load_basic_features_for_run(
         ch1_min.shape[0],
         max_ch4.shape[0],
         tmax_ch4.shape[0],
+        tmax_ch0.shape[0],
+        tmax_ch1.shape[0],
     )
-    n = min(n0, nmin, n5, nped0, nped1, n1, nc1min, n4, nt4)
+    n = min(n0, nmin, n5, nped0, nped1, n1, nc1min, n4, nt4, nt0, nt1)
 
-    if not (n0 == nmin == n5 == nped0 == nped1 == n1 == nc1min == n4 == nt4):
+    if not (n0 == nmin == n5 == nped0 == nped1 == n1 == nc1min == n4 == nt4 == nt0 == nt1):
         print(f"[警告] 事件数不一致，仅使用前 {n} 个事件。")
 
     max_ch0 = max_ch0[:n]
@@ -169,19 +324,32 @@ def _load_basic_features_for_run(
     ch1_min = ch1_min[:n]
     max_ch4 = max_ch4[:n]
     tmax_ch4 = tmax_ch4[:n]
+    tmax_ch0 = tmax_ch0[:n]
+    tmax_ch1 = tmax_ch1[:n]
 
-    return max_ch0, ch0_min, max_ch5, ch0_ped_mean, ch1_ped_mean, max_ch1, ch1_min, max_ch4, tmax_ch4
-
+    return (
+        max_ch0,
+        ch0_min,
+        max_ch5,
+        ch0_ped_mean,
+        ch1_ped_mean,
+        max_ch1,
+        ch1_min,
+        max_ch4,
+        tmax_ch4,
+        tmax_ch0,
+        tmax_ch1,
+    )
 
 def cut_ch0_min_positive(ch0_min: np.ndarray, threshold: float = 0.0) -> np.ndarray:
     """条件：ch0_min > threshold（排除抑制信号）。"""
 
     return ch0_min > threshold
 
-def cut_ch0_max_saturation(max_ch0: np.ndarray, max_val: float = 16382.0) -> np.ndarray:
-    """条件：max_ch0 <= max_val（排除饱和事例）。"""
+def cut_ch0_max_saturation(max_ch0: np.ndarray, max_ch1: np.ndarray, max_val: float = 16382.0) -> np.ndarray:
+    """条件：max_ch0 <= max_val 且 max_ch1 <= max_val（排除 CH0/CH1 饱和事例）。"""
 
-    return max_ch0 <= max_val
+    return (max_ch0 <= max_val) & (max_ch1 <= max_val)
 
 def cut_ch5_self_trigger(max_ch5: np.ndarray, rt_threshold: float = 6000.0) -> np.ndarray:
     """条件：max_ch5 <= rt_threshold（排除随机触发）。"""
@@ -219,6 +387,25 @@ def cut_pedestal_3sigma(
             mask = mask & (np.abs(ch1_ped_mean - ped_mu1) <= n_sigma * ped_sigma1)
 
     return mask
+
+def cut_ch3ped_min(
+    ch3ped_mean: np.ndarray,
+    min_ch3: np.ndarray,
+    *,
+    sigma_yx: float = 15.0,) -> np.ndarray:
+    """
+    CH3 ped-min 带状 cut：
+    - 要求点位于 y=x 周边 sigma_yx 内（默认 |min_ch3 - ch3ped_mean| <= 20）
+    - 并显式要求 min_ch3 > 0。
+    """
+    x = np.asarray(ch3ped_mean, dtype=np.float64)
+    y = np.asarray(min_ch3, dtype=np.float64)
+    n = min(x.shape[0], y.shape[0])
+    x = x[:n]
+    y = y[:n]
+    fin = np.isfinite(x) & np.isfinite(y)
+    sig = float(sigma_yx)
+    return fin & (np.abs(y - x) <= sig) & (y > 0.0)
 
 def cut_acv(
     max_ch4: np.ndarray,
@@ -320,6 +507,192 @@ def cut_pncut(
     band_mask = np.abs(resid_all) <= n_sigma * sigma
     return band_mask
 
+def cut_ch0max_tmax(
+    base_mask: np.ndarray,
+    max_ch0: np.ndarray,
+    tmax_ch0: np.ndarray,
+    fit_x_min: float = 1160.0,
+    fit_y_min: float = 10200.0,
+    fit_y_max: float = 13500.0,
+    n_sigma: float = 3.0,
+    min_fit_events: int = 10,) -> np.ndarray:
+    """CH0 max vs tmax(CH0) 相关带 cut（与 basic+acv.py 保持一致）。"""
+    def _model(x: np.ndarray, a: float, b: float, c: float, d: float) -> np.ndarray:
+        return a * np.log(x - b) + c * x + d / x
+
+    n = max_ch0.shape[0]
+    assert tmax_ch0.shape[0] == n and base_mask.shape[0] == n
+    max_ch0 = np.asarray(max_ch0, dtype=np.float64)
+    tmax_ch0 = np.asarray(tmax_ch0, dtype=np.float64)
+
+    fit_mask = base_mask & (max_ch0 > fit_x_min) & (tmax_ch0 > fit_y_min) & (tmax_ch0 < fit_y_max)
+    xf = max_ch0[fit_mask]
+    yf = tmax_ch0[fit_mask]
+    if xf.size < max(4, min_fit_events):
+        return base_mask.copy()
+
+    xmin = float(np.min(xf))
+    b_hi = xmin - 1e-9
+    A0 = np.column_stack([np.log(xf), xf, 1.0 / xf])
+    coef0, _, rank0, _ = np.linalg.lstsq(A0, yf, rcond=None)
+    if rank0 < 3:
+        return base_mask.copy()
+    a0, c0, d0 = float(coef0[0]), float(coef0[1]), float(coef0[2])
+    b0 = min(xmin * 0.5, xmin - 200.0)
+    p0 = np.array([a0, b0, c0, d0], dtype=np.float64)
+    bounds = ([-np.inf, -np.inf, -np.inf, -np.inf], [np.inf, b_hi, np.inf, np.inf])
+    try:
+        popt, _ = curve_fit(_model, xf, yf, p0=p0, bounds=bounds, maxfev=100000)
+    except (ValueError, RuntimeError):
+        return base_mask.copy()
+    a, b, c, d = float(popt[0]), float(popt[1]), float(popt[2]), float(popt[3])
+    if not np.isfinite([a, b, c, d]).all():
+        return base_mask.copy()
+    y_hat_fit = _model(xf, a, b, c, d)
+    sigma = float(np.std(yf - y_hat_fit))
+    if sigma <= 0.0:
+        return base_mask.copy()
+
+    valid = max_ch0 > b + 1e-9
+    y_pred = np.empty(n, dtype=np.float64)
+    y_pred[:] = np.nan
+    y_pred[valid] = _model(max_ch0[valid], a, b, c, d)
+    resid = tmax_ch0 - y_pred
+    in_band = np.zeros(n, dtype=bool)
+    in_band[valid] = np.abs(resid[valid]) <= n_sigma * sigma
+    return in_band
+
+def cut_ch1max_tmax(
+    base_mask: np.ndarray,
+    max_ch1: np.ndarray,
+    tmax_ch1: np.ndarray,
+    fit_x_min: float = 1350.0,
+    fit_y_min: float = 11000.0,
+    fit_y_max: float = 17500.0,
+    n_sigma: float = 1.0,
+    min_fit_events: int = 10,) -> np.ndarray:
+    """CH1 max vs tmax(CH1) 相关带 cut（与 basic+acv.py 保持一致）。"""
+    def _model(x: np.ndarray, a: float, b: float, c: float, d: float) -> np.ndarray:
+        return a * np.log(x - b) + c * x + d / x
+
+    n = max_ch1.shape[0]
+    assert tmax_ch1.shape[0] == n and base_mask.shape[0] == n
+    max_ch1 = np.asarray(max_ch1, dtype=np.float64)
+    tmax_ch1 = np.asarray(tmax_ch1, dtype=np.float64)
+
+    fit_mask = base_mask & (max_ch1 > fit_x_min) & (tmax_ch1 > fit_y_min) & (tmax_ch1 < fit_y_max)
+    xf = max_ch1[fit_mask]
+    yf = tmax_ch1[fit_mask]
+    if xf.size < max(4, min_fit_events):
+        return base_mask.copy()
+
+    xmin = float(np.min(xf))
+    b_hi = xmin - 1e-9
+    A0 = np.column_stack([np.log(xf), xf, 1.0 / xf])
+    coef0, _, rank0, _ = np.linalg.lstsq(A0, yf, rcond=None)
+    if rank0 < 3:
+        return base_mask.copy()
+    a0, c0, d0 = float(coef0[0]), float(coef0[1]), float(coef0[2])
+    b0 = min(xmin * 0.5, xmin - 200.0)
+    p0 = np.array([a0, b0, c0, d0], dtype=np.float64)
+    bounds = ([-np.inf, -np.inf, -np.inf, -np.inf], [np.inf, b_hi, np.inf, np.inf])
+    try:
+        popt, _ = curve_fit(_model, xf, yf, p0=p0, bounds=bounds, maxfev=100000)
+    except (ValueError, RuntimeError):
+        return base_mask.copy()
+    a, b, c, d = float(popt[0]), float(popt[1]), float(popt[2]), float(popt[3])
+    if not np.isfinite([a, b, c, d]).all():
+        return base_mask.copy()
+    y_hat_fit = _model(xf, a, b, c, d)
+    sigma = float(np.std(yf - y_hat_fit))
+    if sigma <= 0.0:
+        return base_mask.copy()
+
+    valid = max_ch1 > b + 1e-9
+    y_pred = np.empty(n, dtype=np.float64)
+    y_pred[:] = np.nan
+    y_pred[valid] = _model(max_ch1[valid], a, b, c, d)
+    resid = tmax_ch1 - y_pred
+    in_band = np.zeros(n, dtype=bool)
+    in_band[valid] = np.abs(resid[valid]) <= n_sigma * sigma
+    return in_band
+
+def _compute_basic_acv_mask(
+    ch2_n_fit_points: np.ndarray,
+    ch3_n_fit_points: np.ndarray,
+    ch2_tanh_p0: np.ndarray,
+    ch3_tanh_p0: np.ndarray,
+    max_ch0: np.ndarray,
+    ch0_min: np.ndarray,
+    max_ch5: np.ndarray,
+    ch0_ped_mean: np.ndarray,
+    ch1_ped_mean: np.ndarray,
+    max_ch1: np.ndarray,
+    ch1_min: np.ndarray,
+    ch3ped_mean: np.ndarray,
+    min_ch3: np.ndarray,
+    max_ch4: np.ndarray,
+    tmax_ch4: np.ndarray,
+    tmax_ch0: np.ndarray,
+    tmax_ch1: np.ndarray,
+    log_prefix: str = "[basic+acv]",) -> np.ndarray:
+    """按 basic+acv.py 顺序计算 m1~m8 并返回最终 mask。"""
+    n_raw = max_ch0.shape[0]
+    print(f"{log_prefix} 原始事件数: {n_raw}")
+
+    m0 = cut_fit_success(ch2_n_fit_points, ch3_n_fit_points, ch2_tanh_p0, ch3_tanh_p0)
+    print(f"{log_prefix} cut_fit_success 单独使用后: {int(m0.sum())} / {n_raw}")
+
+    m1 = cut_ch0_min_positive(ch0_min)
+    print(f"{log_prefix} cut_ch0_min_positive 单独使用后: {int(m1.sum())} / {n_raw}")
+
+    m2 = cut_ch0_max_saturation(max_ch0, max_ch1)
+    print(f"{log_prefix} cut_ch0_max_saturation 单独使用后: {int(m2.sum())} / {n_raw}")
+
+    m3 = cut_ch5_self_trigger(max_ch5)
+    print(f"{log_prefix} cut_ch5_self_trigger 单独使用后: {int(m3.sum())} / {n_raw}")
+
+    m4 = cut_pedestal_3sigma(ch0_ped_mean, ch1_ped_mean, max_ch5)
+    print(f"{log_prefix} cut_pedestal_3sigma 单独使用后: {int(m4.sum())} / {n_raw}")
+    m4b = cut_ch3ped_min(ch3ped_mean, min_ch3)
+    print(f"{log_prefix} cut_ch3ped_min 单独使用后: {int(m4b.sum())} / {n_raw}")
+
+    m5 = cut_acv(max_ch4, tmax_ch4)
+    print(f"{log_prefix} cut_acv 单独使用后: {int(m5.sum())} / {n_raw}")
+
+    m6 = cut_mincut(ch0_min, ch1_min, max_ch4, tmax_ch4)
+    print(f"{log_prefix} cut_mincut 单独使用后: {int(m6.sum())} / {n_raw}")
+
+    # m7 = cut_ch0max_tmax(m1 & m2 & m3 & m4 & m5 & m6, max_ch0, tmax_ch0)
+    # print(f"{log_prefix} cut_ch0max_tmax 单独使用后: {int((m1 & m2 & m3 & m4 & m5 & m6 & m7).sum())} / {n_raw}")
+
+    # m8 = cut_ch1max_tmax(m1 & m2 & m3 & m4 & m5 & m6 & m7, max_ch1, tmax_ch1)
+    # print(f"{log_prefix} cut_ch1max_tmax 单独使用后: {int((m1 & m2 & m3 & m4 & m5 & m6 & m7 & m8).sum())} / {n_raw}")
+
+    return m0 & m1 & m2 & m3 & m4 & m4b & m5 & m6 
+
+def _compute_basic_6mask(
+    max_ch0: np.ndarray,
+    max_ch1: np.ndarray,
+    ch0_min: np.ndarray,
+    max_ch5: np.ndarray,
+    ch0_ped_mean: np.ndarray,
+    ch1_ped_mean: np.ndarray,
+    ch1_min: np.ndarray,
+    max_ch4: np.ndarray,
+    tmax_ch4: np.ndarray,
+    log_prefix: str = "[basic_6mask]",) -> np.ndarray:
+    """仅使用前六个 mask（m1~m6）。"""
+    n_raw = max_ch0.shape[0]
+    m1 = cut_ch0_min_positive(ch0_min)
+    m2 = cut_ch0_max_saturation(max_ch0, max_ch1)
+    m3 = cut_ch5_self_trigger(max_ch5)
+    m4 = cut_pedestal_3sigma(ch0_ped_mean, ch1_ped_mean, max_ch5)
+    m5 = cut_acv(max_ch4, tmax_ch4)
+    m6 = cut_mincut(ch0_min, ch1_min, max_ch4, tmax_ch4)
+    mask6 = m1 & m2 & m3 & m4 & m5 & m6
+    print(f"{log_prefix} 仅 m1~m6 后剩余: {int(mask6.sum())} / {n_raw}")
+    return mask6
 
 def _load_basic_acv_pass_events() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -329,7 +702,7 @@ def _load_basic_acv_pass_events() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     - passed_energy:  (N,) 对应能量（keV）
     """
 
-    pairs = _list_paired_param_files()
+    pairs = _list_paired_param_files_with_ch2_ch3()
     print(f"[basic+acv] 找到 {len(pairs)} 个可配对的参数文件。")
 
     all_max_ch0: List[np.ndarray] = []
@@ -341,9 +714,19 @@ def _load_basic_acv_pass_events() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     all_ch1_min: List[np.ndarray] = []
     all_max_ch4: List[np.ndarray] = []
     all_tmax_ch4: List[np.ndarray] = []
+    all_tmax_ch0: List[np.ndarray] = []
+    all_tmax_ch1: List[np.ndarray] = []
+    all_ch2_n_fit_points: List[np.ndarray] = []
+    all_ch3_n_fit_points: List[np.ndarray] = []
+    all_ch2_tanh_p0: List[np.ndarray] = []
+    all_ch3_tanh_p0: List[np.ndarray] = []
+    all_ch3_ped_mean: List[np.ndarray] = []
+    all_ch3_min: List[np.ndarray] = []
 
     for ch0_path, ch5_path in pairs:
-        m0, cmin, m5, ped0, ped1, m1, c1min, m4, t4 = _load_basic_features_for_run(ch0_path, ch5_path)
+        m0, cmin, m5, ped0, ped1, m1, c1min, m4, t4, tc0, tc1 = _load_basic_features_for_run(ch0_path, ch5_path)
+        ch2_nfit, ch3_nfit, ch2_p0, ch3_p0 = _load_ch2_ch3_fit_quality_aligned(ch0_path, m0.shape[0])
+        ch3_ped, ch3_min = _load_ch3_ped_min_aligned(ch0_path, m0.shape[0])
         all_max_ch0.append(m0)
         all_ch0_min.append(cmin)
         all_max_ch5.append(m5)
@@ -353,6 +736,14 @@ def _load_basic_acv_pass_events() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         all_ch1_min.append(c1min)
         all_max_ch4.append(m4)
         all_tmax_ch4.append(t4)
+        all_tmax_ch0.append(tc0)
+        all_tmax_ch1.append(tc1)
+        all_ch2_n_fit_points.append(ch2_nfit)
+        all_ch3_n_fit_points.append(ch3_nfit)
+        all_ch2_tanh_p0.append(ch2_p0)
+        all_ch3_tanh_p0.append(ch3_p0)
+        all_ch3_ped_mean.append(ch3_ped)
+        all_ch3_min.append(ch3_min)
 
     max_ch0 = np.concatenate(all_max_ch0)
     ch0_min = np.concatenate(all_ch0_min)
@@ -363,46 +754,218 @@ def _load_basic_acv_pass_events() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     ch1_min = np.concatenate(all_ch1_min)
     max_ch4 = np.concatenate(all_max_ch4)
     tmax_ch4 = np.concatenate(all_tmax_ch4)
+    tmax_ch0 = np.concatenate(all_tmax_ch0)
+    tmax_ch1 = np.concatenate(all_tmax_ch1)
+    ch2_n_fit_points = np.concatenate(all_ch2_n_fit_points)
+    ch3_n_fit_points = np.concatenate(all_ch3_n_fit_points)
+    ch2_tanh_p0 = np.concatenate(all_ch2_tanh_p0)
+    ch3_tanh_p0 = np.concatenate(all_ch3_tanh_p0)
+    ch3_ped_mean = np.concatenate(all_ch3_ped_mean)
+    ch3_min = np.concatenate(all_ch3_min)
 
-    n_raw = max_ch0.shape[0]
-    print(f"[basic+acv] 原始事件数: {n_raw}")
-
-    m1 = cut_ch0_min_positive(ch0_min)
-    n1 = int(m1.sum())
-    print(f"[basic+acv] cut_ch0_min_positive 单独使用后: {n1} / {n_raw}")
-
-    m2 = cut_ch0_max_saturation(max_ch0)
-    n2 = int(m2.sum())
-    print(f"[basic+acv] cut_ch0_max_saturation 单独使用后: {n2} / {n_raw}")
-
-    m3 = cut_ch5_self_trigger(max_ch5)
-    n3 = int(m3.sum())
-    print(f"[basic+acv] cut_ch5_self_trigger 单独使用后: {n3} / {n_raw}")
-
-    m4 = cut_pedestal_3sigma(ch0_ped_mean, ch1_ped_mean, max_ch5)
-    n4 = int(m4.sum())
-    print(f"[basic+acv] cut_pedestal_3sigma 单独使用后: {n4} / {n_raw}")
-
-    m5 = cut_acv(max_ch4, tmax_ch4)
-    n5 = int(m5.sum())
-    print(f"[basic+acv] cut_acv 单独使用后: {n5} / {n_raw}")
-
-    m6 = cut_mincut(ch0_min, ch1_min, max_ch5, max_ch4, tmax_ch4)
-    n6 = int(m6.sum())
-    print(f"[basic+acv] cut_mincut 单独使用后: {n6} / {n_raw}")
-
-    mask = m1 & m2 & m3 & m4 & ~m5 & m6
-    #mask = m1 & m2 & m3 & m4 & m6
-    pn_mask = cut_pncut(mask, max_ch0, max_ch1)
-    n_final = int(mask.sum())
-    n_pn = int(pn_mask.sum())
-    print(f"[basic+acv] 依次使用 cuts 后最终剩余(mask): {n_final} / {n_raw}")
-    print(f"[basic+acv] pn_mask 结果（注意：当前与 basic+acv.py 一致，未叠加到最终 mask）: {n_pn} / {n_raw}")
+    mask = _compute_basic_acv_mask(
+        ch2_n_fit_points=ch2_n_fit_points,
+        ch3_n_fit_points=ch3_n_fit_points,
+        ch2_tanh_p0=ch2_tanh_p0,
+        ch3_tanh_p0=ch3_tanh_p0,
+        max_ch0=max_ch0,
+        ch0_min=ch0_min,
+        max_ch5=max_ch5,
+        ch0_ped_mean=ch0_ped_mean,
+        ch1_ped_mean=ch1_ped_mean,
+        max_ch1=max_ch1,
+        ch1_min=ch1_min,
+        ch3ped_mean=ch3_ped_mean,
+        min_ch3=ch3_min,
+        max_ch4=max_ch4,
+        tmax_ch4=tmax_ch4,
+        tmax_ch0=tmax_ch0,
+        tmax_ch1=tmax_ch1,
+        log_prefix="[basic+acv]",
+    )
 
     passed_max_ch0 = max_ch0[mask]
     passed_max_ch1 = max_ch1[mask]
     passed_energy = ENERGY_A * passed_max_ch0 + ENERGY_B
     return passed_max_ch0, passed_max_ch1, passed_energy
+
+def _load_basic_6mask_pass_events() -> np.ndarray:
+    """读取参数并返回仅使用 6 个 mask（m1~m6）后的能量数组。"""
+    pairs = _list_paired_param_files()
+    all_max_ch0: List[np.ndarray] = []
+    all_ch0_min: List[np.ndarray] = []
+    all_max_ch5: List[np.ndarray] = []
+    all_ch0_ped_mean: List[np.ndarray] = []
+    all_ch1_ped_mean: List[np.ndarray] = []
+    all_max_ch1: List[np.ndarray] = []
+    all_ch1_min: List[np.ndarray] = []
+    all_max_ch4: List[np.ndarray] = []
+    all_tmax_ch4: List[np.ndarray] = []
+    all_tmax_ch0: List[np.ndarray] = []
+    all_tmax_ch1: List[np.ndarray] = []
+
+    for ch0_path, ch5_path in pairs:
+        m0, cmin, m5, ped0, ped1, m1, c1min, m4, t4, tc0, tc1 = _load_basic_features_for_run(ch0_path, ch5_path)
+        all_max_ch0.append(m0)
+        all_ch0_min.append(cmin)
+        all_max_ch5.append(m5)
+        all_ch0_ped_mean.append(ped0)
+        all_ch1_ped_mean.append(ped1)
+        all_max_ch1.append(m1)
+        all_ch1_min.append(c1min)
+        all_max_ch4.append(m4)
+        all_tmax_ch4.append(t4)
+        all_tmax_ch0.append(tc0)
+        all_tmax_ch1.append(tc1)
+
+    max_ch0 = np.concatenate(all_max_ch0)
+    ch0_min = np.concatenate(all_ch0_min)
+    max_ch5 = np.concatenate(all_max_ch5)
+    ch0_ped_mean = np.concatenate(all_ch0_ped_mean)
+    ch1_ped_mean = np.concatenate(all_ch1_ped_mean)
+    ch1_min = np.concatenate(all_ch1_min)
+    max_ch1 = np.concatenate(all_max_ch1)
+    max_ch4 = np.concatenate(all_max_ch4)
+    tmax_ch4 = np.concatenate(all_tmax_ch4)
+
+    mask6 = _compute_basic_6mask(
+        max_ch0=max_ch0,
+        max_ch1=max_ch1,
+        ch0_min=ch0_min,
+        max_ch5=max_ch5,
+        ch0_ped_mean=ch0_ped_mean,
+        ch1_ped_mean=ch1_ped_mean,
+        ch1_min=ch1_min,
+        max_ch4=max_ch4,
+        tmax_ch4=tmax_ch4,
+        log_prefix="[basic_6mask]",
+    )
+    return ENERGY_A * max_ch0[mask6] + ENERGY_B
+
+def _load_basic_acv_bs_pass_events(
+    rise_time_threshold: float = BS_RISE_TIME_THRESHOLD,) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    在 basic+acv 全部 cut 基础上，增加 bscut：rise_time = ln(19)/p1 < rise_time_threshold。
+    返回 (passed_max_ch0, passed_energy) 用于能谱绘制。
+    """
+    pairs = _list_paired_param_files_with_ch2_ch3()
+    if not pairs:
+        print("[basic+acv+bs] 无 CH2/CH3 参数文件，跳过 basic+acv+bs 能谱。")
+        return np.array([], dtype=np.float64), np.array([], dtype=np.float64)
+
+    print(f"[basic+acv+bs] 找到 {len(pairs)} 个含 CH2/CH3 的可配对参数文件。")
+    all_max_ch0: List[np.ndarray] = []
+    all_ch0_min: List[np.ndarray] = []
+    all_max_ch5: List[np.ndarray] = []
+    all_ch0_ped_mean: List[np.ndarray] = []
+    all_ch1_ped_mean: List[np.ndarray] = []
+    all_max_ch1: List[np.ndarray] = []
+    all_ch1_min: List[np.ndarray] = []
+    all_max_ch4: List[np.ndarray] = []
+    all_tmax_ch4: List[np.ndarray] = []
+    all_tmax_ch0: List[np.ndarray] = []
+    all_tmax_ch1: List[np.ndarray] = []
+    all_p1: List[np.ndarray] = []
+    all_ch2_n_fit_points: List[np.ndarray] = []
+    all_ch3_n_fit_points: List[np.ndarray] = []
+    all_ch2_tanh_p0: List[np.ndarray] = []
+    all_ch3_tanh_p0: List[np.ndarray] = []
+    all_ch3_ped_mean: List[np.ndarray] = []
+    all_ch3_min: List[np.ndarray] = []
+
+    for ch0_path, ch5_path in pairs:
+        m0, cmin, m5, ped0, ped1, m1, c1min, m4, t4, tc0, tc1 = _load_basic_features_for_run(ch0_path, ch5_path)
+        with h5py.File(CH3_PARAM_DIR / ch0_path.name, "r") as f:
+            p1 = np.asarray(f["tanh_p1"][...], dtype=np.float64)
+        ch2_nfit, ch3_nfit, ch2_p0, ch3_p0 = _load_ch2_ch3_fit_quality_aligned(ch0_path, m0.shape[0])
+        ch3_ped, ch3_min = _load_ch3_ped_min_aligned(ch0_path, m0.shape[0])
+        n = min(m0.shape[0], p1.shape[0], tc0.shape[0], tc1.shape[0], ch2_nfit.shape[0], ch3_nfit.shape[0], ch2_p0.shape[0], ch3_p0.shape[0], ch3_ped.shape[0], ch3_min.shape[0])
+        all_max_ch0.append(m0[:n])
+        all_ch0_min.append(cmin[:n])
+        all_max_ch5.append(m5[:n])
+        all_ch0_ped_mean.append(ped0[:n])
+        all_ch1_ped_mean.append(ped1[:n])
+        all_max_ch1.append(m1[:n])
+        all_ch1_min.append(c1min[:n])
+        all_max_ch4.append(m4[:n])
+        all_tmax_ch4.append(t4[:n])
+        all_tmax_ch0.append(tc0[:n])
+        all_tmax_ch1.append(tc1[:n])
+        all_p1.append(p1[:n])
+        all_ch2_n_fit_points.append(ch2_nfit[:n])
+        all_ch3_n_fit_points.append(ch3_nfit[:n])
+        all_ch2_tanh_p0.append(ch2_p0[:n])
+        all_ch3_tanh_p0.append(ch3_p0[:n])
+        all_ch3_ped_mean.append(ch3_ped[:n])
+        all_ch3_min.append(ch3_min[:n])
+
+    max_ch0 = np.concatenate(all_max_ch0)
+    ch0_min = np.concatenate(all_ch0_min)
+    max_ch5 = np.concatenate(all_max_ch5)
+    ch0_ped_mean = np.concatenate(all_ch0_ped_mean)
+    ch1_ped_mean = np.concatenate(all_ch1_ped_mean)
+    max_ch1 = np.concatenate(all_max_ch1)
+    ch1_min = np.concatenate(all_ch1_min)
+    max_ch4 = np.concatenate(all_max_ch4)
+    tmax_ch4 = np.concatenate(all_tmax_ch4)
+    tmax_ch0 = np.concatenate(all_tmax_ch0)
+    tmax_ch1 = np.concatenate(all_tmax_ch1)
+    p1 = np.concatenate(all_p1)
+    ch2_n_fit_points = np.concatenate(all_ch2_n_fit_points)
+    ch3_n_fit_points = np.concatenate(all_ch3_n_fit_points)
+    ch2_tanh_p0 = np.concatenate(all_ch2_tanh_p0)
+    ch3_tanh_p0 = np.concatenate(all_ch3_tanh_p0)
+    ch3_ped_mean = np.concatenate(all_ch3_ped_mean)
+    ch3_min = np.concatenate(all_ch3_min)
+
+    n_align = min(max_ch0.shape[0], p1.shape[0], tmax_ch0.shape[0], tmax_ch1.shape[0])
+    max_ch0 = max_ch0[:n_align]
+    ch0_min = ch0_min[:n_align]
+    max_ch5 = max_ch5[:n_align]
+    ch0_ped_mean = ch0_ped_mean[:n_align]
+    ch1_ped_mean = ch1_ped_mean[:n_align]
+    max_ch1 = max_ch1[:n_align]
+    ch1_min = ch1_min[:n_align]
+    max_ch4 = max_ch4[:n_align]
+    tmax_ch4 = tmax_ch4[:n_align]
+    tmax_ch0 = tmax_ch0[:n_align]
+    tmax_ch1 = tmax_ch1[:n_align]
+    p1 = p1[:n_align]
+    ch2_n_fit_points = ch2_n_fit_points[:n_align]
+    ch3_n_fit_points = ch3_n_fit_points[:n_align]
+    ch2_tanh_p0 = ch2_tanh_p0[:n_align]
+    ch3_tanh_p0 = ch3_tanh_p0[:n_align]
+    ch3_ped_mean = ch3_ped_mean[:n_align]
+    ch3_min = ch3_min[:n_align]
+
+    basic_mask = _compute_basic_acv_mask(
+        ch2_n_fit_points=ch2_n_fit_points,
+        ch3_n_fit_points=ch3_n_fit_points,
+        ch2_tanh_p0=ch2_tanh_p0,
+        ch3_tanh_p0=ch3_tanh_p0,
+        max_ch0=max_ch0,
+        ch0_min=ch0_min,
+        max_ch5=max_ch5,
+        ch0_ped_mean=ch0_ped_mean,
+        ch1_ped_mean=ch1_ped_mean,
+        max_ch1=max_ch1,
+        ch1_min=ch1_min,
+        ch3ped_mean=ch3_ped_mean,
+        min_ch3=ch3_min,
+        max_ch4=max_ch4,
+        tmax_ch4=tmax_ch4,
+        tmax_ch0=tmax_ch0,
+        tmax_ch1=tmax_ch1,
+        log_prefix="[basic+acv+bs]",
+    )
+    rise_time = np.where(p1 > 1e-10, LN_19 / p1, np.nan)
+    bs_mask = np.isfinite(rise_time) & (rise_time < rise_time_threshold)
+    mask = basic_mask & bs_mask
+
+    passed_max_ch0 = max_ch0[mask]
+    passed_energy = ENERGY_A * passed_max_ch0 + ENERGY_B
+    print(f"[basic+acv+bs] 通过 basic+acv + rise_time<{rise_time_threshold} 后: {mask.sum()} 事例")
+    return passed_max_ch0, passed_energy
 
 def _load_event_mapping(path: Path) -> Tuple[List[str], np.ndarray, np.ndarray, np.ndarray]:
     if not path.exists():
@@ -423,23 +986,25 @@ def _load_event_mapping(path: Path) -> Tuple[List[str], np.ndarray, np.ndarray, 
 
     return file_paths, event_file_indices, event_event_indices, labels
 
-def _compute_max_ch0_for_cluster(
+def _compute_max_ch0_for_clusters(
     file_paths: Sequence[str],
     event_file_indices: np.ndarray,
     event_event_indices: np.ndarray,
     labels: np.ndarray,
-    target_cluster: int = 0,) -> np.ndarray:
+    target_clusters: Sequence[int],) -> np.ndarray:
     """
-    对给定 cluster 中的所有事件，从 CH0max 源文件读取 max(ch0)，并将对应文件在 RTCH0max 中的 RT 事件并入。
+    对给定 cluster（可多个）中的所有事件，从 CH0max 源文件读取 max(ch0)，
+    并将对应文件在 RTCH0max 中的 RT 事件并入。多 cluster 时返回叠加后的事件集合。
     """
-
-    mask = labels.astype(int) == int(target_cluster)
+    target_set = set(int(c) for c in target_clusters)
+    mask = np.isin(labels.astype(int), list(target_set))
     if not np.any(mask):
-        print(f"cluster={target_cluster}: 在映射文件中没有事件。")
+        print(f"cluster={{{_format_cluster_label(target_clusters)}}}: 在映射文件中没有事件。")
         return np.array([], dtype=np.float64)
 
     indices = np.nonzero(mask)[0]
-    print(f"cluster={target_cluster}: 共有事件数 = {indices.size}")
+    cluster_str = _format_cluster_label(target_clusters)
+    print(f"cluster={{{cluster_str}}}: 共有事件数 = {indices.size}")
 
     file_to_events: Dict[int, List[int]] = defaultdict(list)
     for i in indices:
@@ -507,8 +1072,12 @@ def _compute_max_ch0_for_cluster(
             max_values.extend(max_vals_file.tolist())
 
     max_values_arr = np.asarray(max_values, dtype=np.float64)
-    print(f"cluster={target_cluster}: 成功计算 max(ch0) 的事件数 = {max_values_arr.size}")
+    print(f"cluster={{{cluster_str}}}: 成功计算 max(ch0) 的事件数 = {max_values_arr.size}")
     return max_values_arr
+
+def _format_cluster_label(clusters: Sequence[int]) -> str:
+    """将 cluster 列表格式化为标签字符串，如 '4' 或 '4,5,6'。"""
+    return ",".join(map(str, sorted(clusters)))
 
 def _compute_rates_from_energy(energy_values: np.ndarray, bin_edges: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if energy_values.size == 0:
@@ -528,15 +1097,74 @@ def _compute_rates_from_energy(energy_values: np.ndarray, bin_edges: np.ndarray)
 def _default_hdf5_path_relative_to_project_root() -> Path:
     return PROJECT_ROOT / "data" / "hdf5" / "ge_30param_umap_hdbscan_eventmap.h5"
 
+def _default_efficiency_curve_path() -> Path:
+    """默认效率曲线路径：act/efficiency_curve.h5（相对于本脚本所在目录）。"""
+    return Path(__file__).resolve().parent / "act" / "efficiency_curve.h5"
+
+def _load_efficiency_curve(
+    path: Path,) -> Tuple[np.ndarray, np.ndarray, np.ndarray | None] | None:
+    """
+    从 efficiency_curve.h5 加载效率曲线。
+    返回 (energy_keV, efficiency, bin_edges_saved | None)，若文件不存在或格式不符则返回 None。
+    bin_edges_saved 用于检查是否与当前 bin 一一对应。
+    """
+    path = Path(path)
+    if not path.exists():
+        return None
+    try:
+        with h5py.File(path, "r") as f:
+            if "energy_keV" not in f or "efficiency" not in f:
+                return None
+            energy_kev = np.asarray(f["energy_keV"][...], dtype=np.float64)
+            efficiency = np.asarray(f["efficiency"][...], dtype=np.float64)
+            bin_edges_saved = None
+            if "bin_edges" in f:
+                bin_edges_saved = np.asarray(f["bin_edges"][...], dtype=np.float64)
+            if energy_kev.size == 0 or efficiency.size == 0:
+                return None
+            return energy_kev, efficiency, bin_edges_saved
+    except Exception as exc:
+        print(f"[效率修正] 加载 {path} 失败: {exc}")
+        return None
+
+def _compute_efficiency_corrected_rates(
+    bin_centers: np.ndarray,
+    bin_edges: np.ndarray,
+    rates_cluster: np.ndarray,
+    eff_energy: np.ndarray,
+    efficiency: np.ndarray,
+    bin_edges_saved: np.ndarray | None,) -> np.ndarray:
+    """
+    使用效率曲线对 cluster 计数率进行修正：真实计数率 = 观测计数率 / 效率。
+    若 bin_edges 与保存的一致，则一一对应直接除法；否则在 bin_centers 处插值。
+    """
+    # 一一对应：bin 完全一致时直接除法，更准确
+    if bin_edges_saved is not None and bin_edges_saved.size == bin_edges.size:
+        if np.allclose(bin_edges_saved, bin_edges):
+            eff_use = efficiency
+        else:
+            eff_use = np.interp(bin_centers, eff_energy, efficiency)
+    elif eff_energy.size == bin_centers.size and np.allclose(eff_energy, bin_centers):
+        eff_use = efficiency
+    else:
+        eff_use = np.interp(bin_centers, eff_energy, efficiency)
+    min_eff = 1e-4
+    rates_corrected = np.where(
+        eff_use > min_eff,
+        rates_cluster / eff_use,
+        np.nan,
+    )
+    return rates_corrected
+
 def plot_efficiency_vs_energy(
     bin_centers: np.ndarray,
     bin_widths: np.ndarray,
     rates_cluster: np.ndarray,
     rates_basic: np.ndarray,
-    cluster: int,
+    rates_basic_6mask: np.ndarray | None,
+    cluster: int | str,
     e_min_kev: float = 0.0,
-    e_max_kev: float = 0.6,
-) -> None:
+    e_max_kev: float = 0.6,) -> None:
     """
     绘制效率图：每个 bin 的 cluster 计数率 / basic+acv 计数率。
     另起一个 figure，横轴能量 (keV)，纵轴效率；仅显示 [e_min_kev, e_max_kev] 范围内的效率。
@@ -562,6 +1190,29 @@ def plot_efficiency_vs_energy(
     plt.rcParams.update({"font.family": "serif", "font.serif": ["Times New Roman"]})
     fig, ax = plt.subplots(1, 1, figsize=(8, 5))
     ax.errorbar(x_eff, eff, yerr=eff_err, fmt="o", color="C0", markersize=4, capsize=2, capthick=1, label=f"cluster={cluster} / basic+acv")
+    if rates_basic_6mask is not None and rates_basic_6mask.size == rates_basic.size:
+        mask_valid6 = mask_range & (rates_basic_6mask > 0)
+        if np.any(mask_valid6):
+            x6 = bin_centers[mask_valid6]
+            rc6 = rates_cluster[mask_valid6]
+            rb6 = rates_basic_6mask[mask_valid6]
+            bw6 = bin_widths[mask_valid6]
+            eff6 = rc6 / rb6
+            denom6 = EXPOSURE_KG * bw6 * EXPOSURE_DAYS
+            counts_c6 = np.maximum(rc6 * denom6, 0.5)
+            counts_b6 = np.maximum(rb6 * denom6, 0.5)
+            eff6_err = eff6 * np.sqrt(1.0 / counts_c6 + 1.0 / counts_b6)
+            ax.errorbar(
+                x6,
+                eff6,
+                yerr=eff6_err,
+                fmt="s",
+                color="C4",
+                markersize=3,
+                capsize=2,
+                capthick=1,
+                label=f"cluster={cluster} / basic_6mask",
+            )
     ax.set_xlim(e_min_kev, e_max_kev)
     ax.set_xlabel("Energy (keV)", fontsize=12)
     ax.set_ylabel("Efficiency (cluster rate / basic+acv rate)", fontsize=12)
@@ -571,35 +1222,80 @@ def plot_efficiency_vs_energy(
     fig.tight_layout()
     plt.show()
 
-
 def _plot_cluster_overlay_with_fit(
     bin_edges: np.ndarray,
     bin_centers: np.ndarray,
     bin_widths: np.ndarray,
     rates_cluster: np.ndarray,
     rates_basic: np.ndarray,
-    cluster: int,) -> None:
+    rates_basic_6mask: np.ndarray | None,
+    clusters: Sequence[int],
+    efficiency_curve_path: Path | None = None,
+    rates_basic_acv_bs: np.ndarray | None = None,) -> None:
     plt.rcParams.update({"font.family": "serif", "font.serif": ["Times New Roman"]})
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-    ax.bar(
-        bin_centers,
-        rates_cluster,
-        width=bin_widths,
+    # 使用 step 阶梯线绘制，代替填充 bar
+    _step_x = np.append(bin_edges[:-1], bin_edges[-1])
+    _step_y_cluster = np.append(rates_cluster, rates_cluster[-1])
+    ax.step(
+        _step_x,
+        _step_y_cluster,
+        where="post",
         color="C0",
-        alpha=0.6,
-        align="center",
-        label=f"UMAP+HDBSCAN cluster={cluster}",
+        alpha=0.8,
+        linewidth=0.6,
+        label=f"UMAP+HDBSCAN cluster={_format_cluster_label(clusters)}",
     )
-    ax.bar(
-        bin_centers,
-        rates_basic,
-        width=bin_widths,
+    _step_y_basic = np.append(rates_basic, rates_basic[-1])
+    ax.step(
+        _step_x,
+        _step_y_basic,
+        where="post",
         color="C1",
-        alpha=0.6,
-        align="center",
-        label="basic+acv cuts",
+        alpha=0.8,
+        linewidth=0.6,
+        label="basic+noise cuts",
     )
+    if rates_basic_6mask is not None and rates_basic_6mask.size == rates_basic.size:
+        _step_y_basic6 = np.append(rates_basic_6mask, rates_basic_6mask[-1])
+        ax.step(
+            _step_x,
+            _step_y_basic6,
+            where="post",
+            color="C4",
+            alpha=0.8,
+            linewidth=0.6,
+            label="basic cuts",
+        )
+    # cluster 效率修正曲线：使用 act/efficiency_curve.h5（或命令行指定路径）
+    if efficiency_curve_path is not None:
+        loaded = _load_efficiency_curve(efficiency_curve_path)
+        if loaded is None:
+            print(f"[效率修正] 未能加载效率曲线: {efficiency_curve_path}")
+        else:
+            eff_energy, efficiency, bin_edges_saved = loaded
+            rates_cluster_corr = _compute_efficiency_corrected_rates(
+                bin_centers=bin_centers,
+                bin_edges=bin_edges,
+                rates_cluster=rates_cluster,
+                eff_energy=eff_energy,
+                efficiency=efficiency,
+                bin_edges_saved=bin_edges_saved,
+            )
+            if np.isfinite(rates_cluster_corr).any():
+                _step_y_corr = np.append(rates_cluster_corr, rates_cluster_corr[-1])
+                ax.step(
+                    _step_x,
+                    _step_y_corr,
+                    where="post",
+                    color="C2",
+                    alpha=0.9,
+                    linewidth=0.7,
+                    label=f"UMAP+HDBSCAN cluster={_format_cluster_label(clusters)} (eff-corrected)",
+                )
+            else:
+                print("[效率修正] 修正后曲线全部为无效值，跳过绘制。")
     ax.set_yscale("log")
     ax.set_xlabel("Energy (keV)", fontsize=12)
     ax.set_ylabel(r"Rate [counts / (keV·kg·day)]", fontsize=12)
@@ -607,6 +1303,7 @@ def _plot_cluster_overlay_with_fit(
     ax.grid(True, alpha=0.3)
     ax.legend()
     ax.set_xlim(0, 2)
+    ax.set_ylim(1e-1, 1e7)
     fig.tight_layout()
 
     # ----------------------------
@@ -641,7 +1338,7 @@ def _plot_cluster_overlay_with_fit(
             print(f"10–11 keV 峰拟合结果: mu = {mu_fit:.4f} keV, FWHM = {fwhm:.4f} keV")
 
             fig_fit, ax_fit = plt.subplots(1, 1, figsize=(8, 6))
-            ax_fit.scatter(x_roi, y_roi, color="C0", label=f"Data (cluster={cluster})", zorder=3)
+            ax_fit.scatter(x_roi, y_roi, color="C0", label=f"Data (cluster={_format_cluster_label(clusters)})", zorder=3)
 
             x_fit = np.linspace(x_roi.min(), x_roi.max(), 400)
             y_fit = gauss_linear(x_fit, *popt)
@@ -676,20 +1373,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cluster",
         type=int,
-        default=0,
-        help="要分析的 cluster label（默认 5，与 spectrum.py 保持一致）。",
+        nargs="+",
+        default=[0],
+        metavar="C",
+        help="要分析的 cluster label，可指定多个（如 --cluster 4 5 6），展示叠加后的能谱总形状。",
     )
     parser.add_argument(
         "--bins",
         type=int,
-        default=500,
-        help="能谱直方图 bin 数（默认 500）。",
+        default=100,
+        help="能谱与效率曲线共用 bin 数（默认 1000，约 2 eV/bin，与 acvcombine_spectrum 一一对应）。",
     )
     parser.add_argument(
-        "--bins-efficiency",
-        type=int,
-        default=120,
-        help="效率图在 [0, 0.6] keV 范围内的 bin 数（默认 120，约 5 eV/bin）。",
+        "--efficiency-curve",
+        type=str,
+        default=None,
+        help="效率曲线 HDF5 路径；若不指定，使用 act/efficiency_curve.h5。",
     )
     return parser.parse_args()
 
@@ -709,27 +1408,42 @@ def main() -> None:
 
     print(f"[combine_spectrum] 使用事件映射 HDF5: {hdf5_path}")
     file_paths, event_file_indices, event_event_indices, labels = _load_event_mapping(hdf5_path)
-    max_values_cluster = _compute_max_ch0_for_cluster(
+    max_values_cluster = _compute_max_ch0_for_clusters(
         file_paths=file_paths,
         event_file_indices=event_file_indices,
         event_event_indices=event_event_indices,
         labels=labels,
-        target_cluster=args.cluster,
+        target_clusters=args.cluster,
     )
     energy_cluster = ENERGY_A * max_values_cluster + ENERGY_B
 
     # basic+acv spectrum (from basic+acv.py)
     passed_max_ch0, passed_max_ch1, energy_basic = _load_basic_acv_pass_events()
+    energy_basic_6mask = np.array([], dtype=np.float64)
 
-    # Use common bin edges so the overlay is aligned.
+    # 固定 bin 范围 [0, 2] keV，与 acvcombine_spectrum 一一对应，便于效率修正
     energy_all = np.concatenate([energy_cluster, energy_basic]) if energy_basic.size > 0 else energy_cluster
     if energy_all.size == 0:
         raise RuntimeError("energy_all 为空，无法绘图（cluster 与 basic+acv 都没有事件通过/可用）。")
 
-    bin_edges = np.histogram_bin_edges(energy_all, bins=args.bins)
+    bin_edges = np.linspace(E_MIN_BIN, E_MAX_BIN, args.bins + 1)
+    ec_in = energy_cluster[(energy_cluster >= E_MIN_BIN) & (energy_cluster <= E_MAX_BIN)]
+    eb_in = energy_basic[(energy_basic >= E_MIN_BIN) & (energy_basic <= E_MAX_BIN)]
+    eb6_in = energy_basic_6mask[(energy_basic_6mask >= E_MIN_BIN) & (energy_basic_6mask <= E_MAX_BIN)]
 
-    bin_centers, bin_widths, rates_cluster = _compute_rates_from_energy(energy_cluster, bin_edges)
-    _, _, rates_basic = _compute_rates_from_energy(energy_basic, bin_edges)
+    bin_centers, bin_widths, rates_cluster = _compute_rates_from_energy(ec_in, bin_edges)
+    _, _, rates_basic = _compute_rates_from_energy(eb_in, bin_edges)
+    if eb6_in.size > 0:
+        _, _, rates_basic_6mask = _compute_rates_from_energy(eb6_in, bin_edges)
+    else:
+        rates_basic_6mask = None
+    eff_path: Path | None = None
+    if args.efficiency_curve:
+        eff_path = Path(args.efficiency_curve)
+        if not eff_path.is_absolute():
+            eff_path = (Path(__file__).resolve().parent / eff_path).resolve()
+    else:
+        eff_path = _default_efficiency_curve_path()
 
     _plot_cluster_overlay_with_fit(
         bin_edges=bin_edges,
@@ -737,24 +1451,22 @@ def main() -> None:
         bin_widths=bin_widths,
         rates_cluster=rates_cluster,
         rates_basic=rates_basic,
-        cluster=args.cluster,
+        rates_basic_6mask=rates_basic_6mask,
+        clusters=args.cluster,
+        efficiency_curve_path=eff_path,
+        rates_basic_acv_bs=None,
     )
 
-    # 效率图使用更细的 bin（0–0.6 keV 范围）
-    e_min_eff, e_max_eff = 0.0, 2.0
-    bin_edges_eff = np.linspace(e_min_eff, e_max_eff, args.bins_efficiency + 1)
-    ec_in = energy_cluster[(energy_cluster >= e_min_eff) & (energy_cluster <= e_max_eff)]
-    eb_in = energy_basic[(energy_basic >= e_min_eff) & (energy_basic <= e_max_eff)]
-    bc_eff, bw_eff, rc_eff = _compute_rates_from_energy(ec_in, bin_edges_eff)
-    _, _, rb_eff = _compute_rates_from_energy(eb_in, bin_edges_eff)
+    # 效率图使用与能谱叠加相同的 bin（一一对应）
     plot_efficiency_vs_energy(
-        bin_centers=bc_eff,
-        bin_widths=bw_eff,
-        rates_cluster=rc_eff,
-        rates_basic=rb_eff,
-        cluster=args.cluster,
-        e_min_kev=e_min_eff,
-        e_max_kev=e_max_eff,
+        bin_centers=bin_centers,
+        bin_widths=bin_widths,
+        rates_cluster=rates_cluster,
+        rates_basic=rates_basic,
+        rates_basic_6mask=rates_basic_6mask,
+        cluster=_format_cluster_label(args.cluster),
+        e_min_kev=E_MIN_BIN,
+        e_max_kev=E_MAX_BIN,
     )
 
     # basic+acv scatter plot (same as basic+acv.py)

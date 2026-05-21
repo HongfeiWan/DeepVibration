@@ -70,13 +70,13 @@ def cut_ch0_min_positive(ch0_min: np.ndarray, threshold: float = 0.0) -> np.ndar
     """
     return ch0_min > threshold
 
-def cut_ch0_max_saturation(max_ch0: np.ndarray, max_val: float = 16382.0) -> np.ndarray:
+def cut_ch0_max_saturation(max_ch0: np.ndarray, max_ch1: np.ndarray, max_val: float = 16382.0) -> np.ndarray:
     """
-    条件：max_ch0 <= max_val（排除饱和事例）。
-    输入: max_ch0 数组
+    条件：max_ch0 <= max_val 且 max_ch1 <= max_val（排除 CH0/CH1 饱和事例）。
+    输入: max_ch0、max_ch1 数组
     输出: bool 掩码
     """
-    return max_ch0 <= max_val
+    return (max_ch0 <= max_val) & (max_ch1 <= max_val)
 
 def cut_ch5_self_trigger(max_ch5: np.ndarray, rt_threshold: float = 6000.0) -> np.ndarray:
     """
@@ -165,13 +165,17 @@ def _fit_one_channel_for_file(
 
     # 同时读取 CH0 / CH5 的关键参数，用于基础物理 cut
     ch0_param_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH0_parameters")
+    ch1_param_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH1_parameters")
     ch5_param_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH5_parameters")
     ch0_param_path = os.path.join(ch0_param_dir, base_name)
+    ch1_param_path = os.path.join(ch1_param_dir, base_name)
     ch5_param_path = os.path.join(ch5_param_dir, base_name)
 
-    # 必须找到对应的 CH0/CH5 参数文件及所需数据集，否则认为数据不完整，直接报错
+    # 必须找到对应的 CH0/CH1/CH5 参数文件及所需数据集，否则认为数据不完整，直接报错
     if not os.path.exists(ch0_param_path):
         raise FileNotFoundError(f"缺少 CH0 参数文件: {ch0_param_path}")
+    if not os.path.exists(ch1_param_path):
+        raise FileNotFoundError(f"缺少 CH1 参数文件: {ch1_param_path}")
     if not os.path.exists(ch5_param_path):
         raise FileNotFoundError(f"缺少 CH5 参数文件: {ch5_param_path}")
 
@@ -183,6 +187,13 @@ def _fit_one_channel_for_file(
         max_ch0 = np.asarray(f_ch0["max_ch0"][...], dtype=np.float32)
         ch0_min = np.asarray(f_ch0["ch0_min"][...], dtype=np.float32)
 
+    with h5py.File(ch1_param_path, "r") as f_ch1:
+        if "max_ch1" not in f_ch1:
+            raise KeyError(
+                f"CH1 参数文件 {ch1_param_path} 中缺少 max_ch1 数据集"
+            )
+        max_ch1 = np.asarray(f_ch1["max_ch1"][...], dtype=np.float32)
+
     with h5py.File(ch5_param_path, "r") as f_ch5:
         if "max_ch5" not in f_ch5:
             raise KeyError(
@@ -192,17 +203,17 @@ def _fit_one_channel_for_file(
 
     # 计算基础物理 cut 掩码：
     # - ch0_min > 0
-    # - max_ch0 <= 16382
+    # - max_ch0 <= 16382 且 max_ch1 <= 16382
     # - max_ch5 <= 6000
     #
     # 仅对通过上述三个 cut 的事件提交拟合任务；
     # 未通过的事件保持初始化的异常值（bad_val），完全不进入拟合流程。
-    if max_ch0 is not None and ch0_min is not None and max_ch5 is not None:
+    if max_ch0 is not None and ch0_min is not None and max_ch5 is not None and max_ch1 is not None:
         mask_valid = np.zeros(n_events, dtype=bool)
-        n_cut = min(len(max_ch0), len(ch0_min), len(max_ch5), n_events)
+        n_cut = min(len(max_ch0), len(ch0_min), len(max_ch5), len(max_ch1), n_events)
         mask_valid[:n_cut] = (
             cut_ch0_min_positive(ch0_min[:n_cut])
-            & cut_ch0_max_saturation(max_ch0[:n_cut])
+            & cut_ch0_max_saturation(max_ch0[:n_cut], max_ch1[:n_cut])
             & cut_ch5_self_trigger(max_ch5[:n_cut])
         )
     else:

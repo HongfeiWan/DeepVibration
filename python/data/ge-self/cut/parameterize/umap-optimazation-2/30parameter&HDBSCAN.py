@@ -23,17 +23,20 @@ import os
 import sys
 from dataclasses import dataclass
 import re
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import h5py
+import matplotlib.dates as mdates
 import numpy as np
+import pandas as pd
 import umap
 import hdbscan
 from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.covariance import LedoitWolf
 import matplotlib.pyplot as plt
-from scipy.optimize import curve_fit
 
 @dataclass
 class RunParameters:
@@ -64,6 +67,7 @@ def _discover_project_root() -> Path:
 PROJECT_ROOT = _discover_project_root()
 DATA_ROOT = PROJECT_ROOT / "data" / "hdf5" / "raw_pulse"
 CH0_3_DIR = DATA_ROOT / "CH0-3"
+EPOCH_OFFSET_DEFAULT = 2.082816000000000e09
 
 CH_PARAM_DIRS: Dict[int, Path] = {
     0: DATA_ROOT / "CH0_parameters",
@@ -78,8 +82,24 @@ CLUSTER_CACHE_PATH = (
     PROJECT_ROOT
     / "data"
     / "hdf5"
-    / "ge_30param_umap_hdbscan_eventmap.h5"
-)
+    / "ge_30param_umap_hdbscan_eventmap.h5")
+
+# 与 parameterize/tradition/tradition.py、python/utils/plotstyle.md 一致
+_PLOT_TICK = 12
+_PLOT_AXIS = 16
+_PLOT_TITLE = 18
+_PLOT_LEGEND = 12
+_PLOT_SUBPLOT_TITLE = 14
+
+
+def _apply_plotstyle_font() -> None:
+    plt.rcParams.update(
+        {
+            "font.family": "sans-serif",
+            "font.sans-serif": ["Arial"],
+        }
+    )
+
 
 def _save_cluster_eventmap_hdf5(
     path: Path,
@@ -122,111 +142,9 @@ def _save_cluster_eventmap_hdf5(
 
     print(f"[缓存] 已将 UMAP+HDBSCAN 结果保存到: {path}")
 
-def _plot_waveforms_from_cluster_cache(
-    path: Path,
-    ch0_3_dir: Path,
-    sampling_interval_ns: float = 4.0,) -> None:
-    """
-    从缓存的事件映射 HDF5 读取 cluster 结果，对每个 cluster 随机抽样画 CH0/CH3 波形。
-    这样在已经有缓存的情况下，可以跳过 UMAP/HDBSCAN 直接可视化。
-    """
-    if not path.exists():
-        print(f"[缓存] 事件映射 HDF5 不存在，跳过可视化: {path}")
-        return
-
-    with h5py.File(path, "r") as f:
-        file_paths_raw = f["file_paths"][...]
-        event_file_indices = f["event_file_indices"][...]
-        event_event_indices = f["event_event_indices"][...]
-        labels = f["event_cluster_labels"][...]
-
-    file_paths: List[str] = []
-    for p in file_paths_raw:
-        if isinstance(p, bytes):
-            file_paths.append(p.decode("utf-8"))
-        else:
-            file_paths.append(str(p))
-
-    n_events = labels.shape[0]
-    print(f"[缓存] 从 {path} 读取到 {n_events} 个事件的聚类结果。")
-
-    clusters_to_plot = sorted(set(labels.tolist()))
-    sampling_interval_ns = float(sampling_interval_ns)
-
-    for lab in clusters_to_plot:
-        idx_in_cluster = np.where(labels == lab)[0]
-        if idx_in_cluster.size == 0:
-            continue
-
-        n_sample = min(9, idx_in_cluster.size)
-        rng = np.random.default_rng(42 + int(lab))
-        sample_idx = rng.choice(idx_in_cluster, size=n_sample, replace=False)
-
-        fig_wf, axes = plt.subplots(3, 3, figsize=(12, 10))
-        axes = axes.ravel()
-
-        for i, global_idx in enumerate(sample_idx):
-            ax_left = axes[i]
-            fi = int(event_file_indices[global_idx])
-            ev_idx = int(event_event_indices[global_idx])
-            if fi < 0 or fi >= len(file_paths):
-                ax_left.set_visible(False)
-                continue
-
-            base_name = file_paths[fi]
-            ch0_3_path = ch0_3_dir / base_name
-            if not ch0_3_path.exists():
-                ax_left.set_visible(False)
-                continue
-
-            with h5py.File(ch0_3_path, "r") as f_ch:
-                ch_data = f_ch["channel_data"]
-                time_samples, num_channels, num_events = ch_data.shape
-                if num_channels <= 3 or ev_idx >= num_events:
-                    ax_left.set_visible(False)
-                    continue
-                time_us = np.arange(time_samples) * sampling_interval_ns / 1000.0
-                wf_ch0 = ch_data[:, 0, ev_idx].astype(np.float64)
-                wf_ch3 = ch_data[:, 3, ev_idx].astype(np.float64)
-
-            stem = Path(base_name).stem
-            m = re.search(r"(\d+)(?!.*\d)", stem)
-            if m:
-                run_id = m.group(1)
-            else:
-                run_id = stem
-
-            ax_right = ax_left.twinx()
-            ax_left.plot(time_us, wf_ch0, color="C0", linewidth=0.8, label="CH0")
-            ax_right.plot(time_us, wf_ch3, color="C3", linewidth=0.8, label="CH3")
-
-            ax_left.set_title(f"{run_id} | #{ev_idx}", fontsize=10)
-            ax_left.set_xlabel("Time (µs)", fontsize=12)
-            ax_left.set_ylabel("CH0 ADC", fontsize=12)
-            ax_right.set_ylabel("CH3 ADC", fontsize=12)
-
-            ax_left.tick_params(axis="both", which="major", labelsize=10)
-            ax_right.tick_params(axis="y", which="major", labelsize=10, colors="C3")
-            ax_left.grid(True, alpha=0.3)
-
-            lines_left, labels_left = ax_left.get_legend_handles_labels()
-            lines_right, labels_right = ax_right.get_legend_handles_labels()
-            ax_left.legend(
-                lines_left + lines_right,
-                labels_left + labels_right,
-                fontsize=8,
-            )
-
-        for j in range(n_sample, 9):
-            axes[j].set_visible(False)
-
-        lab_name = "Noise" if lab == -1 else f"Cluster {lab}"
-        fig_wf.suptitle(
-            f"All Runs — {lab_name}  (n={idx_in_cluster.size}, shown {n_sample})",
-            fontsize=14,
-        )
-        fig_wf.tight_layout(rect=[0, 0, 1, 0.95])
-        plt.show()
+# ------------------------------------------------------------------
+# 读取文件维度信息
+# ------------------------------------------------------------------
 
 def _list_base_names_from_ch0() -> List[str]:
     """
@@ -255,6 +173,63 @@ def _open_param_file_if_exists(ch: int, base_name: str) -> Path | None:
     if path.exists():
         return path
     return None
+
+def _map_base_name_to_ch03_files(base_name: str) -> List[Path]:
+    ch03_dir = DATA_ROOT / "CH0-3"
+    stem = Path(base_name).stem
+    candidates = [ch03_dir / f"{stem}.h5"]
+    if stem.endswith("_processed"):
+        candidates.append(ch03_dir / f"{stem[:-10]}_processed.h5")
+    else:
+        candidates.append(ch03_dir / f"{stem}_processed.h5")
+    return [c for c in candidates if c.is_file()]
+
+def _read_event_time_datetime64_ns_from_ch03(
+    base_name: str,
+    epoch_offset: float = EPOCH_OFFSET_DEFAULT,) -> np.ndarray:
+    """从 CH0-3 raw_pulse 读取 time_data 并转换为 datetime64[ns]（与 tradition/tradition.py 一致）。"""
+    ch03_candidates = _map_base_name_to_ch03_files(base_name)
+    time_data: np.ndarray | None = None
+    for c in ch03_candidates:
+        try:
+            with h5py.File(c, "r") as f_ch03:
+                if "time_data" not in f_ch03:
+                    continue
+                t = np.asarray(f_ch03["time_data"][...], dtype=np.float64)
+                if t.size == 0:
+                    continue
+                time_data = t
+                break
+        except OSError:
+            continue
+    if time_data is None:
+        raise RuntimeError(f"未能在 CH0-3 为 {base_name} 找到包含 time_data 的文件")
+    if time_data.size == 0:
+        raise RuntimeError(f"{base_name} 对应的 time_data 为空")
+    epoch_start = datetime(1970, 1, 1)
+    eventtime = time_data - float(epoch_offset)
+    dt = epoch_start + pd.to_timedelta(eventtime, unit="s")
+    return dt.to_numpy(dtype="datetime64[ns]")
+
+def _datetime64_ns_to_mpl_date(time_ns: np.ndarray) -> np.ndarray:
+    """datetime64[ns] -> matplotlib date float。"""
+    time_ns = np.asarray(time_ns)
+    time_py = time_ns.astype("M8[ms]").astype(datetime)
+    return np.asarray(mdates.date2num(time_py), dtype=np.float64)
+
+def _concatenate_time_mpl_for_runs(run_params_list: List[RunParameters]) -> np.ndarray:
+    """与 run 顺序、事件数对齐，拼接各 run 的触发时间（matplotlib date num）。"""
+    blocks: List[np.ndarray] = []
+    for rp in run_params_list:
+        time_ns = _read_event_time_datetime64_ns_from_ch03(rp.base_name)
+        time_mpl = _datetime64_ns_to_mpl_date(time_ns)
+        n = int(time_mpl.shape[0])
+        if n != rp.n_events:
+            raise RuntimeError(
+                f"time_data 长度 {n} 与参数事件数 {rp.n_events} 不一致: {rp.base_name}"
+            )
+        blocks.append(time_mpl.astype(np.float64))
+    return np.concatenate(blocks, axis=0)
 
 def _read_all_1d_datasets(
     path: Path,
@@ -351,12 +326,10 @@ def load_run_parameters(base_name: str) -> RunParameters:
         feature_names=feature_names,
     )
 
-
 def _align_run_to_feature_union(
     run_params: RunParameters,
     feature_names_union: List[str],
-    fill_value: float = np.nan,
-) -> np.ndarray:
+    fill_value: float = np.nan,) -> np.ndarray:
     """
     将单个 run 的特征矩阵按“全局特征并集”顺序对齐：
     - run 缺失的维度填充为 fill_value；
@@ -372,12 +345,19 @@ def _align_run_to_feature_union(
         aligned[:, j] = run_params.feature_matrix[:, src_idx]
     return aligned
 
+# ------------------------------------------------------------------
+# 核心
+# ------------------------------------------------------------------
+
 def run_umap_hdbscan(
     features: np.ndarray,
     n_neighbors: int = 15,
     min_dist: float = 0.1,
     min_cluster_size: int = 50,
-    min_samples: int = None,
+    min_samples: int | None = None,
+    cluster_selection_epsilon: float = 0.0,
+    metric: str = "euclidean",
+    metric_kwds: dict | None = None,
     prediction_data: bool = False,) -> Tuple[np.ndarray, np.ndarray]:
     """
     在给定的特征矩阵上执行 UMAP 降维和 HDBSCAN 聚类。
@@ -390,7 +370,8 @@ def run_umap_hdbscan(
         n_neighbors=n_neighbors,
         min_dist=min_dist,
         n_components=2,
-        metric="euclidean",
+        metric=metric,
+        metric_kwds=metric_kwds,
         random_state=42,     # 固定随机种子，确保结果可复现
         low_memory=True,     # 防止爆内存
         force_approximation_algorithm=True,
@@ -404,19 +385,26 @@ def run_umap_hdbscan(
         min_samples=min_samples,
         metric="euclidean",
         cluster_selection_method="eom",
+        cluster_selection_epsilon=float(cluster_selection_epsilon),
         core_dist_n_jobs=-1,  # 使用所有 CPU 核并行计算 core distances
         prediction_data=prediction_data,  # 为 approximate_predict 准备数据
     )
     labels = clusterer.fit_predict(embedding)
     return embedding, labels
 
+# ------------------------------------------------------------------
+# 训练部分
+# ------------------------------------------------------------------
 
 def _fit_umap_hdbscan_on_sample(
     X_sampled: np.ndarray,
     n_neighbors: int = 15,
     min_dist: float = 0.1,
     min_cluster_size: int = 50,
-    min_samples: int = None,) -> Tuple[umap.UMAP, hdbscan.HDBSCAN, np.ndarray, np.ndarray]:
+    min_samples: int | None = None,
+    cluster_selection_epsilon: float = 0.0,
+    metric: str = "euclidean",
+    metric_kwds: dict | None = None,) -> Tuple[umap.UMAP, hdbscan.HDBSCAN, np.ndarray, np.ndarray]:
     """
     仅在抽样子集上拟合 UMAP 和 HDBSCAN，返回训练好的模型，供后续外推使用。
     HDBSCAN 固定使用 prediction_data=True，以支持 approximate_predict。
@@ -426,7 +414,8 @@ def _fit_umap_hdbscan_on_sample(
         n_neighbors=n_neighbors,
         min_dist=min_dist,
         n_components=2,
-        metric="euclidean",
+        metric=metric,
+        metric_kwds=metric_kwds,
         random_state=42,
         low_memory=True,
         force_approximation_algorithm=True,
@@ -440,11 +429,36 @@ def _fit_umap_hdbscan_on_sample(
         min_samples=min_samples,
         metric="euclidean",
         cluster_selection_method="eom",
+        cluster_selection_epsilon=float(cluster_selection_epsilon),
         core_dist_n_jobs=-1,
         prediction_data=True,  # 必需，否则 approximate_predict 无法使用
     )
     labels_s = clusterer.fit_predict(embedding_s)
     return reducer, clusterer, embedding_s, labels_s
+
+def _estimate_cluster_selection_epsilon(
+    embedding: np.ndarray,
+    n_neighbors: int = 12,
+    quantile: float = 0.9,
+    scale: float = 1.0,) -> float:
+    """
+    按 UMAP 2D 点云的局部尺度估计 HDBSCAN 的 cluster_selection_epsilon。
+    用较高分位的 kNN 距离作为“可接受簇间缝隙”，有助于合并视觉上连在一起但被密度树切开的子簇。
+    """
+    n = int(embedding.shape[0])
+    if n < 5:
+        return 0.0
+    k = max(2, min(int(n_neighbors), n - 1))
+    # 第 0 列是自身距离 0，取第 k 列代表第 k 邻居距离
+    from sklearn.neighbors import NearestNeighbors
+    nbrs = NearestNeighbors(n_neighbors=k + 1, metric="euclidean", n_jobs=-1)
+    nbrs.fit(embedding.astype(np.float64))
+    distances, _ = nbrs.kneighbors(embedding.astype(np.float64))
+    kth = distances[:, k]
+    eps = float(np.quantile(kth, quantile) * float(scale))
+    if not np.isfinite(eps) or eps < 0:
+        return 0.0
+    return eps
 
 def _resolve_extrapolate_n_jobs(n_jobs: int) -> int:
     """n_jobs=-1 表示使用全部逻辑 CPU；0 或 1 表示单进程顺序外推。"""
@@ -543,6 +557,7 @@ def extrapolate_cluster_labels(
 # -----------------------------------------------------------------------------
 # 测试 umap
 # -----------------------------------------------------------------------------
+
 def _test_umap_with_selected_features(
     X: np.ndarray,
     feature_names: List[str],
@@ -552,133 +567,143 @@ def _test_umap_with_selected_features(
     extrapolate_n_jobs: int = -1,
     random_state: int = 42,) -> Tuple[np.ndarray, np.ndarray]:
     """
-    临时测试函数：仅使用 15 个物理上最重要的特征做 UMAP+HDBSCAN。
+    临时测试函数：使用当前输入中的全部特征做 UMAP+HDBSCAN。
     当 do_sampling=True 且 n_events > max_points 时，采用「抽样训练 + 分批外推」流程：
     在 10 万点上训练 UMAP+HDBSCAN，再对剩余事例 transform + KNN 赋标签。
     extrapolate_n_jobs=-1 时外推阶段使用多进程（每进程一段数据）；设为 1 则单进程顺序外推。
 
-    当前选取的 15 个维度（8 个 CH0 波形参数 + 5 个快放拟合参数 + 1 个快放高频能量占比 + 1 个快放频谱质心）：
-        - CH0（来自 preprocessor.py 中的 dataset：max_ch0, ch0ped_mean, ch0pedt_mean,
-           ch0ped_var, ch0pedt_var, tmax_ch0, ch0ped_rms, ch0pedt_rms）：
-            ch0_max_ch0
-            ch0_ch0ped_mean
-            ch0_ch0pedt_mean
-            ch0_ch0ped_var
-            ch0_ch0pedt_var
-            ch0_tmax_ch0
-            ch0_ch0ped_rms
-            ch0_ch0pedt_rms
-        - 快放 CH3（来自 CH3_parameters 的 tanh 拟合与频谱特征）：
-            ch3_tanh_p0
-            ch3_tanh_p1
-            ch3_tanh_p2
-            ch3_tanh_p3
-            ch3_tanh_rms
-            ch3_highfreq_energy_ratio  (fast_highfreq_ratio)
-            ch3_spectral_centroid_mhz  (频谱质心，单位 MHz)
+    权重策略：
+    - 默认所有维度权重为 0；
+    - 对当前已验证有效的 15 个物理特征，沿用既有权重；
+    - 其余维度先保留在输入矩阵中，但权重为 0（相当于暂不参与距离计算）。
 
     注意：这是一个方便试验用的函数，未来可以随时删除。
     """
-    selected_names = [
-        # 8 个 CH0 波形参数
-        "ch0_max_ch0",
-        "ch0_ch0ped_mean",
-        "ch0_ch0pedt_mean",
-        "ch0_ch0ped_var",
-        "ch0_ch0pedt_var",
-        "ch0_tmax_ch0",
-        "ch0_ch0ped_rms",
-        "ch0_ch0pedt_rms",
-        # 4 个 tanh 拟合参数 + 1 个 tanh 残差 RMS
-        "ch3_tanh_p0",
-        "ch3_tanh_p1",
-        "ch3_tanh_p2",
-        "ch3_tanh_p3",
-        "ch3_tanh_rms",
-        # 1 个快放信号中高频能量占比
-        "ch3_highfreq_energy_ratio",
-        # 1 个快放信号频谱质心 (MHz)
-        "ch3_spectral_centroid_mhz",
-    ]
-    idx_list: List[int] = []
-    for name in selected_names:
-        if name not in feature_names:
-            print(f"[测试 UMAP] 特征 {name} 不在 feature_names 中，跳过该测试。")
-            # 返回原始 X 及全 -1 标签，表示“仅噪声”，方便主流程继续运行
-            return X, np.full(X.shape[0], -1, dtype=int)
-        idx_list.append(feature_names.index(name))
+    # 输入维度策略：
+    # 仅选取 key_feature_weights 中权重为 1.0 的维度进入 UMAP（例如 4 维就只用 4 维做降维）。
+    selected_names = list(feature_names)
+    key_feature_weights = {
+        # CH0 (preprocessor.py)
+        "ch0_max_ch0": 1.0,                  # 总幅度，决定能量
+        "ch0_tmax_ch0": 1.0,                 # 峰位置
+        "ch0_ch0_min": 1.0,
+        "ch0_ch0ped_mean": 1.0,              # 基线平均值
+        "ch0_ch0ped_var": 0.0,               # 基线方差
+        "ch0_ch0pedt_mean": 1.0,             # 时间窗基线平均
+        "ch0_ch0pedt_var": 1.0,              # 时间相关基线方差
+        "ch0_ch0ped_rms": 0.0,               # 基线 RMS
+        "ch0_ch0pedt_rms": 0.0,              # 时间窗基线 RMS
 
-    X_sel = X[:, idx_list]
-    print(f"[测试 UMAP] 使用特征子集做 UMAP：{selected_names}")
-    print(f"[测试 UMAP] 子矩阵形状: {X_sel.shape}")
+        # CH1 (preprocessor.py)
+        "ch1_max_ch1": 0.0,
+        "ch1_tmax_ch1": 0.0,
+        "ch1_ch1_min": 0.0,
+        "ch1_ch1ped_mean": 0.0,
+        "ch1_ch1ped_var": 0.0,
+        "ch1_ch1pedt_mean": 0.0,
+        "ch1_ch1pedt_var": 0.0,
+        "ch1_ch1ped_rms": 0.0,
+        "ch1_ch1pedt_rms": 0.0,
 
-    # 在进入 UMAP 之前对选定特征做标准化（零均值、单位方差），
-    # 使不同量纲/数值尺度的特征在欧氏距离中贡献更加均衡。
+        # CH2 (fit_ch2_ch3_parallel.py + backfill extrema)
+        "ch2_tanh_p0": 0.0,
+        "ch2_tanh_p1": 0.0,
+        "ch2_tanh_p2": 0.0,
+        "ch2_tanh_p3": 0.0,
+        "ch2_tanh_rms": 0.0,
+        "ch2_highfreq_energy_ratio": 0.0,
+        "ch2_spectral_centroid_mhz": 0.0,
+        "ch2_n_fit_points": 0.0,
+        "ch2_max_ch2": 0.0,
+        "ch2_min_ch2": 0.0,
+        "ch2_tmax_ch2": 0.0,
+        "ch2_tmin_ch2": 0.0,
+        "ch2_ch2ped_mean": 0.0,
+        "ch2_ch2pedt_mean": 0.0,
+
+        # CH3 (fit_ch2_ch3_parallel.py + backfill extrema)
+        "ch3_tanh_p0": 0.0,                  # 快放脉冲幅度
+        "ch3_tanh_p1": 0.0,                  # 时间尺度/上升沿
+        "ch3_tanh_p2": 0.0,                  # 形状参数
+        "ch3_tanh_p3": 0.0,                  # 形状/平顶
+        "ch3_tanh_rms": 0.0,                 # tanh 残差 RMS
+        "ch3_highfreq_energy_ratio": 0.0,    # 高频能量占比
+        "ch3_spectral_centroid_mhz": 0.0,    # 频谱质心
+        "ch3_n_fit_points": 0.0,
+        "ch3_max_ch3": 0.0,
+        "ch3_min_ch3": 0.0,
+        "ch3_tmax_ch3": 0.0,
+        "ch3_tmin_ch3": 0.0,
+        "ch3_ch3ped_mean": 0.0,
+        "ch3_ch3pedt_mean": 0.0,
+
+        # CH4/CH5 (preprocessor.py)
+        "ch4_max_ch4": 0.0,
+        "ch4_tmax_ch4": 0.0,
+        "ch5_max_ch5": 0.0,
+    }
+
+    enabled = {k for k, v in key_feature_weights.items() if float(v) == 1.0}
+    keep_idx = [i for i, name in enumerate(selected_names) if name in enabled]
+    if not keep_idx:
+        raise RuntimeError(
+            "[测试 UMAP] key_feature_weights 中没有任何权重为 1.0 且存在于 feature_names 的特征，无法继续。"
+        )
+
+    selected_names = [selected_names[i] for i in keep_idx]
+    X_sel = X[:, keep_idx]
+    print(f"[测试 UMAP] 仅使用 key_feature_weights==1.0 的维度做 UMAP，维度数: {len(selected_names)}")
+    print(f"[测试 UMAP] 特征矩阵形状: {X_sel.shape}")
+
+    # 标准化后直接作为 UMAP 输入，不再乘以 weights
     scaler = StandardScaler()
-    X_sel_std = scaler.fit_transform(X_sel)
+    X_scaled = scaler.fit_transform(X_sel)
 
-    # ------------------------------------------------------------------
-    # 每个特征的初始“物理权重”（在 UMAP 距离中的相对重要性）：
-    #
-    #   对应顺序与 selected_names 完全一致：
-    #   0  ch0_max_ch0                → weights[0]
-    #   1  ch0_ch0ped_mean            → weights[1]
-    #   2  ch0_ch0pedt_mean           → weights[2]
-    #   3  ch0_ch0ped_var             → weights[3]
-    #   4  ch0_ch0pedt_var            → weights[4]
-    #   5  ch0_tmax_ch0               → weights[5]
-    #   6  ch0_ch0ped_rms             → weights[6]
-    #   7  ch0_ch0pedt_rms            → weights[7]
-    #   8  ch3_tanh_p0                → weights[8]
-    #   9  ch3_tanh_p1                → weights[9]
-    #   10 ch3_tanh_p2                → weights[10]
-    #   11 ch3_tanh_p3                → weights[11]
-    #   12 ch3_tanh_rms               → weights[12]
-    #   13 ch3_highfreq_energy_ratio  → weights[13]
-    #   14 ch3_spectral_centroid_mhz  → weights[14]
-    #
-    #   你可以直接在下面这个数组里改数字来调每一维的权重：
-    #   - >1.0  表示“更重要”，在 UMAP 距离中拉大该维度
-    #   - 1.0   表示“基准权重”
-    #   - <1.0  表示“弱化”该维度（接近 0 相当于忽略）
-    # ------------------------------------------------------------------
-    weights = np.array([
-        0.0,  # 0  ch0_max_ch0             ：总幅度，决定能量               没那么重要    
-        0.0,  # 1  ch0_ch0ped_mean         ：基线平均值，区分基线偏移        没那么重要
-        1.0,  # 2  ch0_ch0pedt_mean        ：时间窗内基线平均，抑制慢漂移     没那么重要
-        1.0,  # 3  ch0_ch0ped_var          ：基线方差，反映噪声水平          没那么重要
-        1.0,  # 4  ch0_ch0pedt_var         ：时间相关的基线方差
-        2.0,  # 5  ch0_tmax_ch0            ：峰位置，区分波形时间结构
-        1.0,  # 6  ch0_ch0ped_rms          ：基线 RMS
-        1.0,  # 7  ch0_ch0pedt_rms         ：时间窗内 RMS
-        1.0,  # 8  ch3_tanh_p0             ：快放脉冲幅度
-        1.0,  # 9  ch3_tanh_p1             ：时间尺度/上升沿相关
-        1.0,  # 10 ch3_tanh_p2             ：形状参数
-        1.0,  # 11 ch3_tanh_p3             ：形状/平顶相关
-        1.0,  # 12 ch3_tanh_rms            ：tanh 残差 RMS
-        1.0,  # 13 ch3_highfreq_energy_ratio ：高频能量占比
-        2.0,  # 14 ch3_spectral_centroid_mhz ：频谱质心，强调峰移向高频
-    ], dtype=float)
+    # 2️⃣ 协方差（稳健）
+    cov = LedoitWolf().fit(X_scaled)
+    V = cov.covariance_
+    X_umap_in = X_scaled
 
-    # 将权重作用在“标准化后的特征”上，相当于在欧氏距离中调节各维度贡献
-    X_weighted = X_sel_std * weights
-
-    n_total = X_weighted.shape[0]
-    umap_kw = dict(min_cluster_size=125, n_neighbors=10, min_samples=None, min_dist=0.1)
+    n_total = X_umap_in.shape[0]
+    umap_kw = dict(
+        min_cluster_size=180,
+        n_neighbors=15,   #越小越碎
+        #min_samples=18,
+        min_dist=0.1,
+        metric="mahalanobis",
+        metric_kwds={"V": V},
+    )
 
     if do_sampling and n_total > max_points:
         # 抽样训练 + 分批外推：先在 10 万点上 fit，再对剩余事例 extrapolate
         rng = np.random.default_rng(random_state)
         sampled_idx = rng.choice(n_total, size=max_points, replace=False).astype(np.int64)
-        X_sampled = X_weighted[sampled_idx]
+        X_sampled = X_umap_in[sampled_idx]
 
         print(f"[测试 UMAP] 抽样 {max_points} 点进行训练，剩余 {n_total - max_points} 点分批外推。")
+        # 先做一遍 UMAP 以估计 epsilon，再用于 HDBSCAN，减少同团块被过度拆分。
+        reducer_probe = umap.UMAP(
+            n_neighbors=umap_kw["n_neighbors"],
+            min_dist=umap_kw["min_dist"],
+            n_components=2,
+            metric=umap_kw["metric"],
+            metric_kwds=umap_kw["metric_kwds"],
+            random_state=42,
+            low_memory=True,
+            force_approximation_algorithm=True,
+            verbose=False,
+            n_jobs=-1,
+        )
+        emb_probe = reducer_probe.fit_transform(X_sampled)
+        eps = _estimate_cluster_selection_epsilon(emb_probe, n_neighbors=12, quantile=0.90, scale=1.0)
+        umap_kw["cluster_selection_epsilon"] = eps
+        print(f"[测试 UMAP] 自适应 cluster_selection_epsilon={eps:.4f}")
         reducer, clusterer, emb_s, lab_s = _fit_umap_hdbscan_on_sample(
             X_sampled, **umap_kw
         )
 
         remaining_idx = np.setdiff1d(np.arange(n_total, dtype=np.int64), sampled_idx)
-        X_remaining = X_weighted[remaining_idx]
+        X_remaining = X_umap_in[remaining_idx]
         emb_rem, lab_rem = extrapolate_cluster_labels(
             reducer,
             emb_s,
@@ -697,14 +722,32 @@ def _test_umap_with_selected_features(
         print(f"[测试 UMAP] 全量 {n_total} 事例的 cluster 标签已外推完成。")
     else:
         # 数据量可接受，直接全量 fit
-        embedding, labels = run_umap_hdbscan(X_weighted, **umap_kw)
+        # 先估计一次 epsilon，避免在 2D 上把视觉连通团块过度拆分。
+        reducer_probe = umap.UMAP(
+            n_neighbors=umap_kw["n_neighbors"],
+            min_dist=umap_kw["min_dist"],
+            n_components=2,
+            metric=umap_kw["metric"],
+            metric_kwds=umap_kw["metric_kwds"],
+            random_state=42,
+            low_memory=True,
+            force_approximation_algorithm=True,
+            verbose=False,
+            n_jobs=-1,
+        )
+        emb_probe = reducer_probe.fit_transform(X_umap_in)
+        eps = _estimate_cluster_selection_epsilon(emb_probe, n_neighbors=12, quantile=0.90, scale=1.0)
+        umap_kw["cluster_selection_epsilon"] = eps
+        print(f"[测试 UMAP] 自适应 cluster_selection_epsilon={eps:.4f}")
+        embedding, labels = run_umap_hdbscan(X_umap_in, **umap_kw)
 
     uniq, counts = np.unique(labels, return_counts=True)
     stats = {int(l): int(c) for l, c in zip(uniq, counts)}
     print(f"[测试 UMAP] 子集特征 HDBSCAN 聚类标签统计 (label: count): {stats}")
 
     # 简单画一个二维 UMAP 图（不再重复波形可视化，以避免干扰主流程）
-    plt.rcParams.update({"font.family": "sans-serif", "font.sans-serif": ["Arial"]})
+    _apply_plotstyle_font()
+    plt.rcParams.setdefault("axes.unicode_minus", False)
     fig, ax = plt.subplots(1, 1, figsize=(8, 6))
     unique_labels = sorted(set(labels))
     cmap = plt.cm.get_cmap("tab20")
@@ -729,12 +772,11 @@ def _test_umap_with_selected_features(
             label=leg_label,
         )
 
-    ax.set_xlabel("UMAP 1", fontsize=16)
-    ax.set_ylabel("UMAP 2", fontsize=16)
-    ax.tick_params(axis="both", which="major", labelsize=12)
-    ax.set_title("TEST: UMAP on selected CH0/CH3 features", fontsize=18)
-    ax.legend(loc="upper right", fontsize=10, ncol=2)
-    ax.grid(True, alpha=0.3)
+    ax.set_xlabel("UMAP 1", fontsize=_PLOT_AXIS)
+    ax.set_ylabel("UMAP 2", fontsize=_PLOT_AXIS)
+    ax.tick_params(axis="both", which="major", labelsize=_PLOT_TICK)
+    # ax.set_title("TEST: UMAP on selected CH0/CH3 features", fontsize=_PLOT_TITLE)
+    ax.legend(loc="upper right", fontsize=_PLOT_LEGEND, ncol=2)
     fig.tight_layout()
     plt.show()
 
@@ -743,7 +785,154 @@ def _test_umap_with_selected_features(
 
 # -----------------------------------------------------------------------------
 # 独立的 cut 函数：输入为对应参数数组，输出为 bool 掩码
+# （与 basic+act.py / ch2ped-pedt.py 中 ±3σ_ped、y=x±1σ、ADC 裁剪一致）
 # -----------------------------------------------------------------------------
+
+# cut_time 筛选参数（与 parameterize/tradition/tradition.py 写死一致）
+CH0_BAND_BURST_LO = 1250.0
+CH0_BAND_BURST_HI = 1500.0
+CH0_TIME_BAND_BURST_RATE_THRESHOLD = 0.5  # count/min
+CH0_TIME_EXCLUDE_BAD_INTERVALS_MPL: Tuple[Tuple[float, float], ...] = ()
+CUT_TIME_RATE_THRESHOLD: Optional[float] = None
+CH3PED_MIN_X_RANGE = (960.0, 980.0)
+# 与 ch3ped-min.py 红区 / 绿区一致（parameterize/tradition/tradition.py 同值）
+CH3PED_X_MEAN_BAND_HALF_SIGMA = 0.5
+CH3PED_RESIDUAL_N_SIGMA = 6.0
+
+
+def cut_time(
+    time_mpl: np.ndarray,
+    bad_intervals: Optional[Sequence[Tuple[float, float]]] = None,
+    *,
+    max_ch0: Optional[np.ndarray] = None,
+    pre_mask: Optional[np.ndarray] = None,
+    rate_threshold: float = CH0_TIME_BAND_BURST_RATE_THRESHOLD,
+    year: Optional[int] = None,) -> np.ndarray:
+    """
+    时间 cut：排除「红区」时间段内的事例，True 表示保留，False 表示剔除。
+    - 若 bad_intervals 已显式传入（非 None），直接使用；
+    - 若 bad_intervals 为 None 且同时提供 max_ch0 与 pre_mask，则按 ch0-time 规则在带内
+      统计计数率并自算坏时间段（辅助逻辑均在本函数内部，不对外暴露）；
+    - 否则回退到 CH0_TIME_EXCLUDE_BAD_INTERVALS_MPL；若仍为空则全部保留。
+    """
+
+    def _plot_window_mpl(yr: int) -> Tuple[float, float]:
+        """与 ch0-time.py 相同：当年 5/20 0:00 — 6/10 24:00（matplotlib date num）。"""
+        x_lo = mdates.date2num(datetime(yr, 5, 20))
+        x_hi = mdates.date2num(datetime(yr, 6, 10))
+        return x_lo, x_hi
+
+    def _merge_bad_bins(
+        edges: np.ndarray,
+        bad_bin: np.ndarray,
+    ) -> List[Tuple[float, float]]:
+        """相邻坏 bin 合并为 [left, right) 区间。"""
+        out: List[Tuple[float, float]] = []
+        nbin = int(bad_bin.size)
+        i = 0
+        while i < nbin:
+            if not bad_bin[i]:
+                i += 1
+                continue
+            j = i
+            while j + 1 < nbin and bad_bin[j + 1]:
+                j += 1
+            out.append((float(edges[i]), float(edges[j + 1])))
+            i = j + 1
+        return out
+
+    def _compute_exclude_intervals(
+        tm: np.ndarray,
+        m0: np.ndarray,
+        yr: int,
+        *,
+        x_lo: Optional[float] = None,
+        x_hi: Optional[float] = None,
+        band_lo: float = CH0_BAND_BURST_LO,
+        band_hi: float = CH0_BAND_BURST_HI,
+        rt: float = rate_threshold,
+    ) -> List[Tuple[float, float]]:
+        tm = np.asarray(tm, dtype=np.float64).reshape(-1)
+        m0 = np.asarray(m0, dtype=np.float64).reshape(-1)
+        n = min(tm.size, m0.size)
+        tm = tm[:n]
+        m0 = m0[:n]
+        if x_lo is None or x_hi is None:
+            x_lo, x_hi = _plot_window_mpl(yr)
+        n_bins = max(30, int((x_hi - x_lo) * 24))
+        band = (m0 >= band_lo) & (m0 <= band_hi)
+        time_band = tm[band]
+        counts, edges = np.histogram(time_band, bins=n_bins, range=(x_lo, x_hi))
+        bin_width_days = float(edges[1] - edges[0])
+        bin_width_min = bin_width_days * 24.0 * 60.0
+        rate_per_min = counts.astype(np.float64) / bin_width_min
+        bad = rate_per_min > float(rt)
+        return _merge_bad_bins(edges, bad)
+
+    def _build_bad_intervals() -> List[Tuple[float, float]]:
+        assert max_ch0 is not None and pre_mask is not None
+        t = np.asarray(time_mpl, dtype=np.float64).reshape(-1)
+        x = np.asarray(max_ch0, dtype=np.float64).reshape(-1)
+        n = min(t.size, x.size)
+        if n == 0:
+            return []
+        t = t[:n]
+        x = x[:n]
+        m = np.asarray(pre_mask, dtype=bool).reshape(-1)[:n]
+        t = t[m]
+        x = x[m]
+        if t.size == 0:
+            return []
+        y = int(mdates.num2date(float(t[0])).year if year is None else int(year))
+        return _compute_exclude_intervals(t, x, y, rt=rate_threshold)
+
+    if bad_intervals is not None:
+        intervals: Sequence[Tuple[float, float]] = bad_intervals
+    elif max_ch0 is not None and pre_mask is not None:
+        intervals = _build_bad_intervals()
+    else:
+        intervals = CH0_TIME_EXCLUDE_BAD_INTERVALS_MPL
+
+    t = np.asarray(time_mpl, dtype=np.float64).reshape(-1)
+    n = t.size
+    ok = np.ones(n, dtype=bool)
+    if not intervals:
+        return ok
+    for a, b in intervals:
+        ok &= ~((t >= a) & (t < b))
+    return ok
+
+CH2_PED_PEDT_INNER_X_MAX = 2000.0
+CH2_PED_PEDT_ADC_MAX = 16382.0
+_LN_19 = float(np.log(19.0))
+
+def cut_fit_success(
+    ch2_n_fit_points: np.ndarray,
+    ch3_n_fit_points: np.ndarray,
+    ch2_tanh_p0: np.ndarray,
+    ch3_tanh_p0: np.ndarray,
+    bad_val: float = 1e6,) -> np.ndarray:
+    """
+    过滤 fit_ch2_ch3_parallel.py 中拟合失败/未参与拟合的事件。
+
+    判定规则（同时满足）：
+    - CH2 与 CH3 的 n_fit_points 都 > 0；
+    - CH2 与 CH3 的 tanh_p0 为有限值，且不等于异常值 bad_val（默认 1e6）。
+    """
+    ch2_n = np.asarray(ch2_n_fit_points, dtype=np.int32)
+    ch3_n = np.asarray(ch3_n_fit_points, dtype=np.int32)
+    ch2_p0 = np.asarray(ch2_tanh_p0, dtype=np.float64)
+    ch3_p0 = np.asarray(ch3_tanh_p0, dtype=np.float64)
+    n = min(ch2_n.shape[0], ch3_n.shape[0], ch2_p0.shape[0], ch3_p0.shape[0])
+    ch2_n = ch2_n[:n]
+    ch3_n = ch3_n[:n]
+    ch2_p0 = ch2_p0[:n]
+    ch3_p0 = ch3_p0[:n]
+
+    ok_npts = (ch2_n > 0) & (ch3_n > 0)
+    ok_ch2 = np.isfinite(ch2_p0) & (~np.isclose(ch2_p0, bad_val))
+    ok_ch3 = np.isfinite(ch3_p0) & (~np.isclose(ch3_p0, bad_val))
+    return ok_npts & ok_ch2 & ok_ch3
 
 def cut_ch0_min_positive(ch0_min: np.ndarray, threshold: float = 0.0) -> np.ndarray:
     """
@@ -753,13 +942,13 @@ def cut_ch0_min_positive(ch0_min: np.ndarray, threshold: float = 0.0) -> np.ndar
     """
     return ch0_min > threshold
 
-def cut_ch0_max_saturation(max_ch0: np.ndarray, max_val: float = 16382.0) -> np.ndarray:
+def cut_ch0_max_saturation(max_ch0: np.ndarray, max_ch1: np.ndarray, max_val: float = 16382.0) -> np.ndarray:
     """
-    条件：max_ch0 <= max_val（排除饱和事例）。
-    输入: max_ch0 数组
+    条件：max_ch0 <= max_val 且 max_ch1 <= max_val（排除 CH0/CH1 饱和事例）。
+    输入: max_ch0、max_ch1 数组
     输出: bool 掩码
     """
-    return max_ch0 <= max_val
+    return (max_ch0 <= max_val) & (max_ch1 <= max_val)
 
 def cut_ch5_self_trigger(max_ch5: np.ndarray, rt_threshold: float = 6000.0) -> np.ndarray:
     """
@@ -768,6 +957,38 @@ def cut_ch5_self_trigger(max_ch5: np.ndarray, rt_threshold: float = 6000.0) -> n
     输出: bool 掩码
     """
     return max_ch5 <= rt_threshold
+
+def cut_pedestal_3sigma(
+    ch0_ped_mean: np.ndarray,
+    ch1_ped_mean: np.ndarray,
+    max_ch5: np.ndarray,
+    rt_threshold: float = 6000.0,
+    n_sigma: float = 3.0,
+    min_rt_events: int = 10,) -> np.ndarray:
+    """
+    前沿基线 cut：使用随机触发事例 (max_ch5 > rt_threshold) 的 CH0/CH1 pedestal 分别拟合高斯，
+    保留 |ch0_ped - μ0| <= n_sigma*σ0 且 |ch1_ped - μ1| <= n_sigma*σ1 的事件。
+    若 RT 事例不足或 σ=0，对应通道返回全 True 掩码（不剔除）。
+    """
+    n = ch0_ped_mean.shape[0]
+    mask = np.ones(n, dtype=bool)
+    rt_mask = max_ch5 > rt_threshold
+
+    ch0_ped_rt = ch0_ped_mean[rt_mask]
+    if ch0_ped_rt.size >= min_rt_events:
+        ped_mu0 = float(ch0_ped_rt.mean())
+        ped_sigma0 = float(ch0_ped_rt.std(ddof=1))
+        if ped_sigma0 > 0.0:
+            mask = mask & (np.abs(ch0_ped_mean - ped_mu0) <= n_sigma * ped_sigma0)
+
+    ch1_ped_rt = ch1_ped_mean[rt_mask]
+    if ch1_ped_rt.size >= min_rt_events:
+        ped_mu1 = float(ch1_ped_rt.mean())
+        ped_sigma1 = float(ch1_ped_rt.std(ddof=1))
+        if ped_sigma1 > 0.0:
+            mask = mask & (np.abs(ch1_ped_mean - ped_mu1) <= n_sigma * ped_sigma1)
+
+    return mask
 
 def cut_acv(
     max_ch4: np.ndarray,
@@ -799,173 +1020,180 @@ def cut_acv(
     # - NaI 过阈（nai_ok == True）：要求满足 acv_mask。
     return (~nai_ok) | (nai_ok & acv_mask)
 
-def cut_ch0max_tmax(
+def cut_mincut(
+    ch0_min: np.ndarray,
+    ch1_min: np.ndarray,
+    max_ch4: np.ndarray,
+    tmax_ch4: np.ndarray,
+    n_sigma: float = 3.0,
+    min_fit_events: int = 10,
+    trigger_threshold: float = 7060.0,
+    t_ge_us: float = 40.0,
+    sampling_interval_ns: float = 4.0,
+    dt_min_us: float = 1.0,
+    dt_max_us: float = 16.0,) -> np.ndarray:
+    """
+    mincut：在 act 基础上，用 act 事例拟合 CH0min/CH1min 分布，
+    保留 CH0min、CH1min 均在中心值 ± n_sigma*σ 内的事件。
+    若拟合样本不足或 σ=0，对应通道不剔除。
+    """
+    n = ch0_min.shape[0]
+    mask = np.ones(n, dtype=bool)
+    acv_mask = cut_acv(max_ch4, tmax_ch4, trigger_threshold, t_ge_us, sampling_interval_ns, dt_min_us, dt_max_us)
+    fit_mask = ~acv_mask
+
+    ch0_min_fit = ch0_min[fit_mask]
+    if ch0_min_fit.size >= min_fit_events:
+        mu0 = float(ch0_min_fit.mean())
+        sigma0 = float(ch0_min_fit.std(ddof=1))
+        if sigma0 > 0.0:
+            mask = mask & (np.abs(ch0_min - mu0) <= n_sigma * sigma0)
+
+    ch1_min_fit = ch1_min[fit_mask]
+    if ch1_min_fit.size >= min_fit_events:
+        mu1 = float(ch1_min_fit.mean())
+        sigma1 = float(ch1_min_fit.std(ddof=1))
+        if sigma1 > 0.0:
+            mask = mask & (np.abs(ch1_min - mu1) <= n_sigma * sigma1)
+
+    return mask
+
+def cut_ch3ped_min(
+    ch3ped_mean: np.ndarray,
+    min_ch3: np.ndarray,
+    *,
+    sigma_yx: float = 20.0,
+    n_sigma_residual: float = CH3PED_RESIDUAL_N_SIGMA,
+    x_mean_band_half_sigma: float = CH3PED_X_MEAN_BAND_HALF_SIGMA,) -> np.ndarray:
+    """
+    CH3 ped-min：与 ch3ped-min.py 图中红区 ∩ 绿区的数学交集一致。
+    - 红区：在全体有限点上 mean(x)、σ_x，保留 x ∈ [mean - h·σ_x, mean + h·σ_x]（h 默认 0.5）。
+    - 绿区：在 |y-x|≤sigma_yx 上拟合 y=x+b，σ_res 为拟合残差标准差，保留 |y-(x+b)|≤n·σ_res（n 默认 6）。
+    - 另要求 ch3ped_mean∈CH3PED_MIN_X_RANGE、min_ch3>0。
+    红/绿任一侧无法统计时，该侧不额外收紧（全 True）。
+    """
+    x = np.asarray(ch3ped_mean, dtype=np.float64)
+    y = np.asarray(min_ch3, dtype=np.float64)
+    n = min(x.shape[0], y.shape[0])
+    x = x[:n]
+    y = y[:n]
+    fin = np.isfinite(x) & np.isfinite(y)
+    sig = float(sigma_yx)
+
+    x_all = x[fin]
+    if x_all.size >= 2:
+        x_mean_all = float(np.mean(x_all))
+        sigma_x = float(np.std(x_all, ddof=1))
+        if np.isfinite(sigma_x) and sigma_x > 0.0:
+            h = float(x_mean_band_half_sigma) * sigma_x
+            red_ok = (x >= x_mean_all - h) & (x <= x_mean_all + h)
+        else:
+            red_ok = np.ones(n, dtype=bool)
+    else:
+        red_ok = np.ones(n, dtype=bool)
+
+    in_yx_band = fin & (np.abs(y - x) <= sig)
+    xf = x[in_yx_band]
+    yf = y[in_yx_band]
+    if xf.size >= 2:
+        b_fit = float(np.mean(yf - xf))
+        resid_fit = yf - xf - b_fit
+        sigma_res = float(np.std(resid_fit, ddof=1))
+        if np.isfinite(sigma_res) and sigma_res > 0.0:
+            resid_all = y - x - b_fit
+            band_ok = np.abs(resid_all) <= float(n_sigma_residual) * sigma_res
+        else:
+            band_ok = np.ones(n, dtype=bool)
+    else:
+        band_ok = np.ones(n, dtype=bool)
+
+    return (
+        (y > 0.0)
+        & red_ok
+        & band_ok)
+
+
+def cut_pncut(
     base_mask: np.ndarray,
     max_ch0: np.ndarray,
-    tmax_ch0: np.ndarray,
-    fit_x_min: float = 1160.0,
-    fit_y_min: float = 10200.0,
-    fit_y_max: float = 13500.0,
-    n_sigma: float = 3.0,
+    max_ch1: np.ndarray,
+    fit_ch0_min: float = 3000.0,
+    fit_ch0_max: float = 12000.0,
+    n_sigma: float = 0.3,
     min_fit_events: int = 10,) -> np.ndarray:
     """
-    CH0 max vs tmax(CH0) 相关带 cut（与 maxch0-tmax 相同模型与拟合窗口）：
-    在 base_mask 为 True 且 x∈(fit_x_min,∞)、y∈(fit_y_min, fit_y_max) 的子集上拟合
-    y = a·ln(x−b) + c·x + d/x；σ 为拟合残差标准差；
-    保留 |tmax_ch0 − ŷ(max_ch0)| <= n_sigma * σ 的事件（默认 3σ，与图中红色带一致）。
-    若拟合样本不足、curve_fit 失败或 σ=0，则返回与 base_mask 相同的掩码（不额外剔除）。
-    对 max_ch0 <= b 无法定义 ŷ 的位置，视为不通过本 cut（False）。
-    输入: base_mask, max_ch0, tmax_ch0
-    输出: bool 掩码
+    pncut：
+    - 先在传入 base_mask 选中的事件中，限定 CH0max 落在 (fit_ch0_min, fit_ch0_max) 区间，
+      对对应的 (CH0max, CH1max) 做一次线性拟合 y = a * x + b；
+    - 计算所有事件相对这条直线的残差 r = CH1max - (a * CH0max + b)；
+    - 将 |r| <= n_sigma * σ 的事件（σ 为残差标准差）视为“主相关带”上的事件，输出 True。
+    若拟合样本不足或 σ=0，则返回与 base_mask 相同的掩码。
     """
-    def _model(
-        x: np.ndarray, a: float, b: float, c: float, d: float
-    ) -> np.ndarray:
-        """y = a·ln(x−b) + c·x + d/x，要求 x > b（与 maxch0-tmax 一致）。"""
-        return a * np.log(x - b) + c * x + d / x
+    def _pncut_fit_ab_sigma(
+        base_mask: np.ndarray,
+        max_ch0: np.ndarray,
+        max_ch1: np.ndarray,
+        fit_ch0_min: float = 3000.0,
+        fit_ch0_max: float = 12000.0,
+        min_fit_events: int = 10,) -> Optional[Tuple[float, float, float]]:
+        """
+        与 cut_pncut 相同的拟合：在 base_mask 且 CH0max∈(fit_ch0_min, fit_ch0_max) 上拟合直线，
+        返回 (a, b, σ)；失败时返回 None。
+        """
+        n = max_ch0.shape[0]
+        assert max_ch1.shape[0] == n and base_mask.shape[0] == n
+        fit_mask = (
+            base_mask
+            & (max_ch0 > fit_ch0_min)
+            & (max_ch0 < fit_ch0_max)
+        )
+        x_fit = max_ch0[fit_mask]
+        y_fit = max_ch1[fit_mask]
+        if x_fit.size < min_fit_events:
+            return None
+        a, b = np.polyfit(x_fit, y_fit, deg=1)
+        y_pred_fit = a * x_fit + b
+        resid_fit = y_fit - y_pred_fit
+        sigma = float(resid_fit.std(ddof=1))
+        if sigma <= 0.0:
+            return None
+        return (float(a), float(b), sigma)
 
     n = max_ch0.shape[0]
-    assert tmax_ch0.shape[0] == n and base_mask.shape[0] == n
+    assert max_ch1.shape[0] == n and base_mask.shape[0] == n
 
-    max_ch0 = np.asarray(max_ch0, dtype=np.float64)
-    tmax_ch0 = np.asarray(tmax_ch0, dtype=np.float64)
-
-    fit_mask = (
-        base_mask
-        & (max_ch0 > fit_x_min)
-        & (tmax_ch0 > fit_y_min)
-        & (tmax_ch0 < fit_y_max)
+    fit = _pncut_fit_ab_sigma(
+        base_mask,
+        max_ch0,
+        max_ch1,
+        fit_ch0_min=fit_ch0_min,
+        fit_ch0_max=fit_ch0_max,
+        min_fit_events=min_fit_events,
     )
-    xf = max_ch0[fit_mask]
-    yf = tmax_ch0[fit_mask]
-    if xf.size < max(4, min_fit_events):
+    if fit is None:
         return base_mask.copy()
+    a, b, sigma = fit
 
-    xmin = float(np.min(xf))
-    b_hi = xmin - 1e-9
-    A0 = np.column_stack([np.log(xf), xf, 1.0 / xf])
-    coef0, _, rank0, _ = np.linalg.lstsq(A0, yf, rcond=None)
-    if rank0 < 3:
-        return base_mask.copy()
-    a0, c0, d0 = float(coef0[0]), float(coef0[1]), float(coef0[2])
-    b0 = min(xmin * 0.5, xmin - 200.0)
-    p0 = np.array([a0, b0, c0, d0], dtype=np.float64)
-    bounds = (
-        [-np.inf, -np.inf, -np.inf, -np.inf],
-        [np.inf, b_hi, np.inf, np.inf],
-    )
-    try:
-        popt, _ = curve_fit(
-            _model,
-            xf,
-            yf,
-            p0=p0,
-            bounds=bounds,
-            maxfev=100000,
-        )
-    except (ValueError, RuntimeError):
-        return base_mask.copy()
-    a, b, c, d = float(popt[0]), float(popt[1]), float(popt[2]), float(popt[3])
-    if not np.isfinite([a, b, c, d]).all():
-        return base_mask.copy()
-    y_hat_fit = _model(xf, a, b, c, d)
-    sigma = float(np.std(yf - y_hat_fit))
-    if sigma <= 0.0:
-        return base_mask.copy()
+    y_pred_all = a * max_ch0 + b
+    resid_all = max_ch1 - y_pred_all
+    band_mask = np.abs(resid_all) <= n_sigma * sigma
 
-    x_all = max_ch0
-    valid = x_all > b + 1e-9
-    y_pred = np.empty(n, dtype=np.float64)
-    y_pred[:] = np.nan
-    y_pred[valid] = _model(x_all[valid], a, b, c, d)
-    resid = tmax_ch0 - y_pred
-    in_band = np.zeros(n, dtype=bool)
-    in_band[valid] = np.abs(resid[valid]) <= n_sigma * sigma
-    return in_band
+    return band_mask
 
-def cut_ch1max_tmax(
-    base_mask: np.ndarray,
-    max_ch1: np.ndarray,
-    tmax_ch1: np.ndarray,
-    fit_x_min: float = 1350.0,
-    fit_y_min: float = 11000.0,
-    fit_y_max: float = 17500.0,
-    n_sigma: float = 1.0,
-    min_fit_events: int = 10,) -> np.ndarray:
+def cut_bscut(
+    tanh_p1: np.ndarray,
+    rise_time_max_us: float = 0.8,) -> np.ndarray:
     """
-    CH1 max vs tmax(CH1) 相关带 cut（与 maxch1-tmax 相同模型与拟合窗口）：
-    在 base_mask 为 True 且 x∈(fit_x_min,∞)、y∈(fit_y_min, fit_y_max) 的子集上拟合
-    y = a·ln(x−b) + c·x + d/x；σ 为拟合残差标准差；
-    保留 |tmax_ch1 − ŷ(max_ch1)| <= n_sigma * σ 的事件（默认 1σ，与图中红色带一致）。
-    若拟合样本不足、curve_fit 失败或 σ=0，则返回与 base_mask 相同的掩码（不额外剔除）。
-    对 max_ch1 <= b 无法定义 ŷ 的位置，视为不通过本 cut（False）。
-    输入: base_mask, max_ch1, tmax_ch1
-    输出: bool 掩码
+    bscut：CH3 上升时间 rise_time = ln(19)/p1（单位 μs，与 ge-self/cut/bscut 中定义一致），
+    选取 rise_time 落在 [rise_time_min_us, rise_time_max_us] 内的事例。
+    p1<=0 或无效时对应位置为 False。
     """
-    def _model(
-        x: np.ndarray, a: float, b: float, c: float, d: float
-    ) -> np.ndarray:
-        return a * np.log(x - b) + c * x + d / x
-
-    n = max_ch1.shape[0]
-    assert tmax_ch1.shape[0] == n and base_mask.shape[0] == n
-
-    max_ch1 = np.asarray(max_ch1, dtype=np.float64)
-    tmax_ch1 = np.asarray(tmax_ch1, dtype=np.float64)
-
-    fit_mask = (
-        base_mask
-        & (max_ch1 > fit_x_min)
-        & (tmax_ch1 > fit_y_min)
-        & (tmax_ch1 < fit_y_max)
-    )
-    xf = max_ch1[fit_mask]
-    yf = tmax_ch1[fit_mask]
-    if xf.size < max(4, min_fit_events):
-        return base_mask.copy()
-
-    xmin = float(np.min(xf))
-    b_hi = xmin - 1e-9
-    A0 = np.column_stack([np.log(xf), xf, 1.0 / xf])
-    coef0, _, rank0, _ = np.linalg.lstsq(A0, yf, rcond=None)
-    if rank0 < 3:
-        return base_mask.copy()
-    a0, c0, d0 = float(coef0[0]), float(coef0[1]), float(coef0[2])
-    b0 = min(xmin * 0.5, xmin - 200.0)
-    p0 = np.array([a0, b0, c0, d0], dtype=np.float64)
-    bounds = (
-        [-np.inf, -np.inf, -np.inf, -np.inf],
-        [np.inf, b_hi, np.inf, np.inf],
-    )
-    try:
-        popt, _ = curve_fit(
-            _model,
-            xf,
-            yf,
-            p0=p0,
-            bounds=bounds,
-            maxfev=100000,
-        )
-    except (ValueError, RuntimeError):
-        return base_mask.copy()
-    a, b, c, d = float(popt[0]), float(popt[1]), float(popt[2]), float(popt[3])
-    if not np.isfinite([a, b, c, d]).all():
-        return base_mask.copy()
-    y_hat_fit = _model(xf, a, b, c, d)
-    sigma = float(np.std(yf - y_hat_fit))
-    if sigma <= 0.0:
-        return base_mask.copy()
-
-    x_all = max_ch1
-    valid = x_all > b + 1e-9
-    y_pred = np.empty(n, dtype=np.float64)
-    y_pred[:] = np.nan
-    y_pred[valid] = _model(x_all[valid], a, b, c, d)
-    resid = tmax_ch1 - y_pred
-    in_band = np.zeros(n, dtype=bool)
-    in_band[valid] = np.abs(resid[valid]) <= n_sigma * sigma
-    return in_band
-
+    p1 = np.asarray(tanh_p1, dtype=np.float64)
+    p1_safe = np.where(p1 > 1e-10, p1, np.nan)
+    rise_us = np.where(np.isfinite(p1_safe), _LN_19 / p1_safe, np.nan)
+    return (
+        np.isfinite(rise_us)
+        & (rise_us <= float(rise_time_max_us)))
 
 
 def main() -> None:
@@ -1023,47 +1251,125 @@ def main() -> None:
     n_total_events, n_features = X.shape
     print(f"\n合并后总事件数: {n_total_events}，特征维度: {n_features}")
 
+    try:
+        time_mpl_all = _concatenate_time_mpl_for_runs(run_params_list)
+    except RuntimeError as e:
+        print(f"[错误] 无法读取触发时间（cut_time 需要 CH0-3 的 time_data）: {e}")
+        return
+    if time_mpl_all.shape[0] != n_total_events:
+        raise RuntimeError(
+            f"时间轴长度 {time_mpl_all.shape[0]} 与特征矩阵行数 {n_total_events} 不一致"
+        )
+
     if feature_names_ref is None:
         raise RuntimeError("feature_names_ref 为空，无法根据 ch0/ch5 进行筛选。")
 
     try:
+        idx_ch2_nfit = feature_names_ref.index("ch2_n_fit_points")
+        idx_ch3_nfit = feature_names_ref.index("ch3_n_fit_points")
+        idx_ch2_p0 = feature_names_ref.index("ch2_tanh_p0")
+        idx_ch3_p0 = feature_names_ref.index("ch3_tanh_p0")
         idx_ch0_max = feature_names_ref.index("ch0_max_ch0")
         idx_ch0_tmax = feature_names_ref.index("ch0_tmax_ch0")
         idx_ch1_max = feature_names_ref.index("ch1_max_ch1")
         idx_ch1_tmax = feature_names_ref.index("ch1_tmax_ch1")
+        idx_ch1_min = feature_names_ref.index("ch1_ch1_min")
+        idx_ch0_ped = feature_names_ref.index("ch0_ch0ped_mean")
+        idx_ch1_ped = feature_names_ref.index("ch1_ch1ped_mean")
         idx_ch5_max = feature_names_ref.index("ch5_max_ch5")
         idx_ch0_min = feature_names_ref.index("ch0_ch0_min")
         idx_ch4_max = feature_names_ref.index("ch4_max_ch4")
         idx_ch4_tmax = feature_names_ref.index("ch4_tmax_ch4")
+        idx_ch3_ped = feature_names_ref.index("ch3_ch3ped_mean")
+        idx_ch3_min = feature_names_ref.index("ch3_min_ch3")
+        idx_ch3_p1 = feature_names_ref.index("ch3_tanh_p1")
     except ValueError as e:
         raise RuntimeError(
-            "在特征列表中未找到 ch0_max_ch0 / ch5_max_ch5 / ch0_ch0_min 之一，"
-            "请检查参数 h5 是否由当前版本的 preprocessor.py 生成。"
+            "在特征列表中未找到 ch2/ch3 拟合质量字段（n_fit_points/tanh_p0）或 "
+            "ch0_max_ch0 / ch5_max_ch5 / ch0_ch0_min / "
+            "ch0_ch0ped_mean / ch1_ch1ped_mean / ch1_ch1_min / "
+            "ch3_ch3ped_mean / ch3_min_ch3 / ch3_tanh_p1 之一，"
+            "请检查参数 h5 是否由当前版本的 preprocessor.py 与 fit 流程生成。"
         ) from e
 
-    ch0_max_all = X[:, idx_ch0_max]
+    # 先过滤拟合失败/未参与拟合的事件（fit_ch2_ch3_parallel.py 赋异常值的事件）
+    m_fit_ok = cut_fit_success(
+        X[:, idx_ch2_nfit],
+        X[:, idx_ch3_nfit],
+        X[:, idx_ch2_p0],
+        X[:, idx_ch3_p0],
+    )
+    n_fit_ok = int(m_fit_ok.sum())
+    print(f"[拟合 cut] 通过拟合成功筛选事件数: {n_fit_ok} / {n_total_events}")
+
+    max_ch0_all = X[:, idx_ch0_max]
     tmax_ch0_all = X[:, idx_ch0_tmax]
     max_ch1_all = X[:, idx_ch1_max]
     tmax_ch1_all = X[:, idx_ch1_tmax]
+    ch1_min_all = X[:, idx_ch1_min]
+    ch0_ped_mean_all = X[:, idx_ch0_ped]
+    ch1_ped_mean_all = X[:, idx_ch1_ped]
     ch5_max_all = X[:, idx_ch5_max]
     ch0_min_all = X[:, idx_ch0_min]
     max_ch4_all = X[:, idx_ch4_max]
     tmax_ch4_all = X[:, idx_ch4_tmax]
+    ch3_ped_mean_all = X[:, idx_ch3_ped]
+    min_ch3_all = X[:, idx_ch3_min]
+    ch3_tanh_p1_all = X[:, idx_ch3_p1]
 
-    # 分别应用基础 cut
+    # 先计算各个基础 cut（与 parameterize/tradition/tradition.py 同序、同命名）
     m_ch0_min = cut_ch0_min_positive(ch0_min_all)
-    m_ch0_max = cut_ch0_max_saturation(ch0_max_all)
+    m_ch0_sat = cut_ch0_max_saturation(max_ch0_all, max_ch1_all)
     m_ch5_rt = cut_ch5_self_trigger(ch5_max_all)
+    m_ped = cut_pedestal_3sigma(ch0_ped_mean_all, ch1_ped_mean_all, ch5_max_all)
     m_acv = cut_acv(max_ch4_all, tmax_ch4_all)
-    # 先得到基础 mask，再在此基础上做 ch0/ch1 的 max-tmax 相关带 cut
-    base_mask = m_ch0_min & m_ch0_max & m_ch5_rt & m_acv
-    m_ch0max_tmax = cut_ch0max_tmax(base_mask, ch0_max_all, tmax_ch0_all)
-    m_ch1max_tmax = cut_ch1max_tmax(base_mask, max_ch1_all, tmax_ch1_all)
-    #mask_physical = base_mask & m_ch0max_tmax & m_ch1max_tmax
-    mask_physical = base_mask
+    m_mincut = cut_mincut(ch0_min_all, ch1_min_all, max_ch4_all, tmax_ch4_all)
+    m_ch3ped_min = cut_ch3ped_min(ch3_ped_mean_all, min_ch3_all)
+    m_bscut = cut_bscut(ch3_tanh_p1_all)
+
+    # 与 ch0-time.py 一致：在 m_pre_m6 & pncut & ch3ped_min 上统计带内计数率，生成红区；
+    # bscut 不参与红区统计（与 tradition.py / ch0-time 作图无关）。
+    m_pre_m6 = (
+        m_fit_ok
+        & m_ch0_min
+        & m_ch0_sat
+        & m_ch5_rt
+        & m_ped
+        & m_acv
+        & m_mincut
+    )
+    m_pn_for_ch0_time = cut_pncut(m_pre_m6, max_ch0_all, max_ch1_all)
+    mask_pre_ch0_time = m_pre_m6 & m_pn_for_ch0_time & m_ch3ped_min
+    _cut_time_rate = (
+        float(CUT_TIME_RATE_THRESHOLD)
+        if CUT_TIME_RATE_THRESHOLD is not None
+        else float(CH0_TIME_BAND_BURST_RATE_THRESHOLD)
+    )
+    m_ch0_time = cut_time(
+        time_mpl_all,
+        bad_intervals=None,
+        max_ch0=max_ch0_all,
+        pre_mask=mask_pre_ch0_time,
+        rate_threshold=_cut_time_rate,
+    )
+
+    # 能谱累计曲线：将 fit_success、pedestal 3σ、mincut、cut_time 合并为一步 basic；
+    # inhibitcut / maxcut / RTcut / acvcut 合并为一步 event cut（tradition.py 1287–1292）。
+    m_basic_cut = m_fit_ok & m_ped & m_mincut & m_ch0_time
+    m_event_cut = m_ch0_min & m_ch0_sat & m_ch5_rt & m_acv
+
+    base_mask = (m_basic_cut & m_event_cut & m_ch3ped_min & m_bscut)
+    m_pn = cut_pncut(base_mask, max_ch0_all, max_ch1_all)
+
+    # 与 tradition.py cut_steps 累计结果一致：basic ∧ event_cut ∧ pncut ∧ ch3pedmin ∧ bscut
+    # ≡ base_mask ∧ m_pn
+    mask_physical = base_mask & m_pn
 
     n_kept = int(mask_physical.sum())
-    print(f"根据物理 cuts（含 CH0/CH1 max-tmax 相关带）筛选后剩余事件数: {n_kept} / {n_total_events}")
+    print(
+        f"[cuts] base_mask={int(base_mask.sum())}/{n_total_events}, "
+        f"最终 base_mask∧pncut={n_kept}/{n_total_events}"
+    )
     if n_kept == 0:
         print("[错误] 所有事件均被 CH0/CH5 条件滤除，终止 UMAP+HDBSCAN。")
         return
@@ -1092,13 +1398,6 @@ def main() -> None:
         all_sources=all_sources,
         embedding=embedding,
         labels=labels,
-    )
-
-    # 从缓存文件中读取结果并进行波形可视化（如已有缓存则只做这一部分）
-    _plot_waveforms_from_cluster_cache(
-        path=CLUSTER_CACHE_PATH,
-        ch0_3_dir=CH0_3_DIR,
-        sampling_interval_ns=4.0,
     )
 
     print("=" * 70)

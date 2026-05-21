@@ -649,18 +649,13 @@ def run_batch_umap_hdbscan_for_ch0_3_files(
         print(f"共找到 {total_files} 个 CH0-3 HDF5 文件，仅处理前 {max_files} 个。")
         ch0_3_files = ch0_3_files[:max_files]
 
-    print(f"\n即将批量处理 {len(ch0_3_files)} 个 CH0-3 文件，并汇总为一个整体参数矩阵。")
-
-    # 汇总所有文件的 15 参数
-    combined_params: Dict[str, List[np.ndarray]] = {name: [] for name in PARAM_NAMES}
+    print(f"\n即将批量处理 {len(ch0_3_files)} 个 CH0-3 文件。")
 
     for idx, fpath in enumerate(ch0_3_files, start=1):
         print("\n" + "=" * 80)
         print(f"[{idx}/{len(ch0_3_files)}] 正在处理文件: {fpath}")
         print("=" * 80)
-
-        # 1. 对当前文件做 ±1σ 事件选择
-        event_ranks, ch0_3_file_sel, _, selected_indices = _select_events_in_1sigma_band(
+        run_umap_hdbscan_visualization(
             ch0_3_file=fpath,
             **kwargs,
         )

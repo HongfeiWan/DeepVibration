@@ -300,7 +300,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cluster",
         type=int,
-        default=5,
+        default=0,
         help="要分析的 cluster label（默认 0）。",
     )
     parser.add_argument(

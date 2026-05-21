@@ -24,8 +24,12 @@ pedcut 工具函数
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, Tuple, Union
 
+import h5py
+import matplotlib.pyplot as plt
 import numpy as np
 
 ArrayLike = Union[np.ndarray]
@@ -190,85 +194,69 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    """
-    使用真实 HDF5 事件数据做一个简单自测：
-    - 自动在 data/hdf5/raw_pulse/CH0-3 下寻找 h5 文件
-    - 读取其中 CH0/CH1 的波形
-    - 在前沿窗口和后沿窗口分别计算 CH0/CH1 的基线（时间平均）
-    - 分别画出前沿基线和后沿基线的分布直方图，方便肉眼检查是否近似高斯
-    """
-    import os
-    import sys
-    import h5py
-    import matplotlib.pyplot as plt
+    def _discover_project_root() -> str:
+        here = os.path.abspath(__file__)
+        cut_dir = os.path.dirname(here)
+        ge_self_dir = os.path.dirname(cut_dir)
+        data_dir = os.path.dirname(ge_self_dir)
+        python_dir = os.path.dirname(data_dir)
+        return os.path.dirname(python_dir)
 
-    # 为了导入 utils.visualize 中的工具，补充项目根下的 python 目录到 sys.path
-    current_dir = os.path.dirname(os.path.abspath(__file__))          # .../python/data/ge-self/cut
-    data_dir = os.path.dirname(current_dir)                           # .../python/data/ge-self
-    python_dir = os.path.dirname(os.path.dirname(data_dir))           # .../python
-    if python_dir not in sys.path:
-        sys.path.insert(0, python_dir)
+    def _read_one_param_pair(args: Tuple[str, str]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        ch0_path, ch1_path = args
+        with h5py.File(ch0_path, "r") as f0, h5py.File(ch1_path, "r") as f1:
+            for key in ("ch0ped_mean", "ch0pedt_mean"):
+                if key not in f0:
+                    raise KeyError(f"{os.path.basename(ch0_path)} 缺少数据集 {key}")
+            for key in ("ch1ped_mean", "ch1pedt_mean"):
+                if key not in f1:
+                    raise KeyError(f"{os.path.basename(ch1_path)} 缺少数据集 {key}")
+            ch0_front = np.asarray(f0["ch0ped_mean"][...], dtype=np.float64)
+            ch0_tail = np.asarray(f0["ch0pedt_mean"][...], dtype=np.float64)
+            ch1_front = np.asarray(f1["ch1ped_mean"][...], dtype=np.float64)
+            ch1_tail = np.asarray(f1["ch1pedt_mean"][...], dtype=np.float64)
+            n = min(ch0_front.size, ch0_tail.size, ch1_front.size, ch1_tail.size)
+            return ch0_front[:n], ch0_tail[:n], ch1_front[:n], ch1_tail[:n]
 
-    from utils.visualize import get_h5_files  # type: ignore[import]  # noqa: E402
+    project_root = _discover_project_root()
+    ch0_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH0_parameters")
+    ch1_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH1_parameters")
+    if not os.path.isdir(ch0_dir) or not os.path.isdir(ch1_dir):
+        raise FileNotFoundError("CH0_parameters 或 CH1_parameters 目录不存在。")
 
-    # 1. 自动查找 CH0-3 的 HDF5 文件
-    h5_files = get_h5_files()
-    if "CH0-3" not in h5_files or not h5_files["CH0-3"]:
-        raise FileNotFoundError("在 data/hdf5/raw_pulse/CH0-3 目录中未找到 h5 文件，无法进行自测")
+    ch0_files = sorted([n for n in os.listdir(ch0_dir) if n.lower().endswith((".h5", ".hdf5"))])
+    ch1_set = set(n for n in os.listdir(ch1_dir) if n.lower().endswith((".h5", ".hdf5")))
+    pairs = [(os.path.join(ch0_dir, n), os.path.join(ch1_dir, n)) for n in ch0_files if n in ch1_set]
+    if not pairs:
+        raise RuntimeError("未找到可配对的 CH0/CH1 参数文件。")
 
-    ch0_3_file = h5_files["CH0-3"][0]
+    cpu_count = os.cpu_count() or 1
     print("=" * 70)
-    print("Pedestal 自测：使用真实 HDF5 事件数据")
+    print(f"使用 CH0/CH1 参数文件并行绘图，文件对数: {len(pairs)}，CPU 核心: {cpu_count}")
     print("=" * 70)
-    print(f"使用文件（CH0-3）：{os.path.basename(ch0_3_file)}")
-    print(f"完整路径：{ch0_3_file}")
 
-    # 2. 读取 CH0/CH1 的波形数据，构造成 (n_samples, n_channels, n_events)
-    with h5py.File(ch0_3_file, "r") as f:
-        if "channel_data" not in f:
-            raise KeyError("HDF5 文件中未找到数据集 'channel_data'")
+    ch0_front_all = []
+    ch1_front_all = []
+    with ProcessPoolExecutor(max_workers=cpu_count) as ex:
+        fut_map = {ex.submit(_read_one_param_pair, pair): pair for pair in pairs}
+        done = 0
+        for fut in as_completed(fut_map):
+            c0f, _c0t, c1f, _c1t = fut.result()
+            ch0_front_all.append(c0f)
+            ch1_front_all.append(c1f)
+            done += 1
+            if done % 20 == 0 or done == len(pairs):
+                print(f"已完成 {done}/{len(pairs)} 文件对")
 
-        channel_data = f["channel_data"]
-        n_samples, n_channels, n_events = channel_data.shape
-        if n_channels < 2:
-            raise ValueError(f"CH0-3 文件通道数为 {n_channels} (<2)，无法同时分析 CH0/CH1")
+    front_ped_ch0 = np.concatenate(ch0_front_all)
+    front_ped_ch1 = np.concatenate(ch1_front_all)
 
-        # 为了避免内存过大，自测时可以限制最大事件数
-        max_events = 20000
-        use_events = min(n_events, max_events)
-        print(f"总事件数: {n_events}，自测使用前 {use_events} 个事件")
-
-        # 只取 CH0/CH1 两个通道，并裁剪事件数
-        # 结果形状: (n_samples, 2, use_events)
-        waveforms = channel_data[:, 0:2, 0:use_events].astype(np.float64)
-
-    # 3. 定义前沿 / 后沿基线时间窗
-    #    - 前沿：波形起始附近，例如 [0, 200)
-    #    - 后沿：波形结束附近，例如 [n_samples-200, n_samples)
-    front_len = min(200, n_samples // 4 if n_samples >= 4 else n_samples)
-    back_len = min(200, n_samples // 4 if n_samples >= 4 else n_samples)
-
-    front_window = (0, front_len)
-    back_window = (n_samples - back_len, n_samples)
-
-    print(f"Front window: {front_window}, Tail window: {back_window}")
-
-    # 4. 计算 CH0/CH1 在前沿 / 后沿的基线（时间平均）
-    front_ped_ch0 = _compute_baseline(waveforms, ch_idx=0, pedestal_window=front_window)
-    front_ped_ch1 = _compute_baseline(waveforms, ch_idx=1, pedestal_window=front_window)
-    back_ped_ch0 = _compute_baseline(waveforms, ch_idx=0, pedestal_window=back_window)
-    back_ped_ch1 = _compute_baseline(waveforms, ch_idx=1, pedestal_window=back_window)
-
-    # 5. 统计量（方便在标题中标注）
     def _mean_sigma(arr: np.ndarray) -> tuple[float, float]:
         return float(arr.mean()), float(arr.std(ddof=1))
 
     mu_f_ch0, sig_f_ch0 = _mean_sigma(front_ped_ch0)
     mu_f_ch1, sig_f_ch1 = _mean_sigma(front_ped_ch1)
-    mu_b_ch0, sig_b_ch0 = _mean_sigma(back_ped_ch0)
-    mu_b_ch1, sig_b_ch1 = _mean_sigma(back_ped_ch1)
 
-    # 6. Plot 4 histograms: CH0/CH1 front & tail baseline distributions
     nsigma_display = 6.0
     nsigma_cut = 3.0
     bins_count = 400
@@ -280,94 +268,33 @@ if __name__ == "__main__":
 
     xmin_f_ch0, xmax_f_ch0 = _range_mu_sigma(mu_f_ch0, sig_f_ch0, nsigma_display)
     xmin_f_ch1, xmax_f_ch1 = _range_mu_sigma(mu_f_ch1, sig_f_ch1, nsigma_display)
-    xmin_b_ch0, xmax_b_ch0 = _range_mu_sigma(mu_b_ch0, sig_b_ch0, nsigma_display)
-    xmin_b_ch1, xmax_b_ch1 = _range_mu_sigma(mu_b_ch1, sig_b_ch1, nsigma_display)
-
-    # 3σ cut ranges for visual reference
     lo_f_ch0, hi_f_ch0 = mu_f_ch0 - nsigma_cut * sig_f_ch0, mu_f_ch0 + nsigma_cut * sig_f_ch0
     lo_f_ch1, hi_f_ch1 = mu_f_ch1 - nsigma_cut * sig_f_ch1, mu_f_ch1 + nsigma_cut * sig_f_ch1
-    lo_b_ch0, hi_b_ch0 = mu_b_ch0 - nsigma_cut * sig_b_ch0, mu_b_ch0 + nsigma_cut * sig_b_ch0
-    lo_b_ch1, hi_b_ch1 = mu_b_ch1 - nsigma_cut * sig_b_ch1, mu_b_ch1 + nsigma_cut * sig_b_ch1
 
-    fig, axes = plt.subplots(2, 2, figsize=(12, 8), sharey=False)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4), sharey=False)
 
-    # Front CH0
-    ax = axes[0, 0]
-    ax.hist(
-        front_ped_ch0,
-        bins=bins_count,
-        range=(xmin_f_ch0, xmax_f_ch0),
-        histtype="step",
-        color="C0",
-        label="Front pedestal CH0",
-    )
+    # 字体大小与 inhibit/select.py 保持同量级
+    label_fs = 12
+    legend_fs = 8
+
+    ax = axes[0]
+    ax.hist(front_ped_ch0, bins=bins_count, range=(xmin_f_ch0, xmax_f_ch0), histtype="step", color="C0", label="CH0 Ped",linewidth=2.0)
     ax.axvline(mu_f_ch0, color="C1", linestyle="--", label=r"$\mu$")
     ax.axvline(lo_f_ch0, color="g", linestyle=":", label=r"$\mu \pm 3\sigma$")
     ax.axvline(hi_f_ch0, color="g", linestyle=":")
-    ax.set_xlabel("Baseline (CH0, front)")
-    ax.set_ylabel("Counts")
-    ax.set_title(f"CH0 front baseline (μ±6σ, bins={bins_count})")
+    ax.set_xlabel("Baseline (CH0, ped)", fontsize=label_fs)
+    ax.set_ylabel("Counts", fontsize=label_fs)
     ax.set_xlim(xmin_f_ch0, xmax_f_ch0)
-    ax.grid(alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=legend_fs)
 
-    # Front CH1
-    ax = axes[0, 1]
-    ax.hist(
-        front_ped_ch1,
-        bins=bins_count,
-        range=(xmin_f_ch1, xmax_f_ch1),
-        histtype="step",
-        color="C0",
-        label="Front pedestal CH1",
-    )
+    ax = axes[1]
+    ax.hist(front_ped_ch1, bins=bins_count, range=(xmin_f_ch1, xmax_f_ch1), histtype="step", color="C0", label="CH1 Ped",linewidth=2.0)
     ax.axvline(mu_f_ch1, color="C1", linestyle="--", label=r"$\mu$")
     ax.axvline(lo_f_ch1, color="g", linestyle=":", label=r"$\mu \pm 3\sigma$")
     ax.axvline(hi_f_ch1, color="g", linestyle=":")
-    ax.set_xlabel("Baseline (CH1, front)")
-    ax.set_title(f"CH1 front baseline (μ±6σ, bins={bins_count})")
+    ax.set_xlabel("Baseline (CH1, ped)", fontsize=label_fs)
     ax.set_xlim(xmin_f_ch1, xmax_f_ch1)
-    ax.grid(alpha=0.3)
-    ax.legend()
-
-    # Tail CH0
-    ax = axes[1, 0]
-    ax.hist(
-        back_ped_ch0,
-        bins=bins_count,
-        range=(xmin_b_ch0, xmax_b_ch0),
-        histtype="step",
-        color="C0",
-        label="Tail baseline CH0",
-    )
-    ax.axvline(mu_b_ch0, color="C1", linestyle="--", label=r"$\mu$")
-    ax.axvline(lo_b_ch0, color="g", linestyle=":", label=r"$\mu \pm 3\sigma$")
-    ax.axvline(hi_b_ch0, color="g", linestyle=":")
-    ax.set_xlabel("Baseline (CH0, tail)")
-    ax.set_ylabel("Counts")
-    ax.set_title(f"CH0 tail baseline (μ±6σ, bins={bins_count})")
-    ax.set_xlim(xmin_b_ch0, xmax_b_ch0)
-    ax.grid(alpha=0.3)
-    ax.legend()
-
-    # Tail CH1
-    ax = axes[1, 1]
-    ax.hist(
-        back_ped_ch1,
-        bins=bins_count,
-        range=(xmin_b_ch1, xmax_b_ch1),
-        histtype="step",
-        color="C0",
-        label="Tail baseline CH1",
-    )
-    ax.axvline(mu_b_ch1, color="C1", linestyle="--", label=r"$\mu$")
-    ax.axvline(lo_b_ch1, color="g", linestyle=":", label=r"$\mu \pm 3\sigma$")
-    ax.axvline(hi_b_ch1, color="g", linestyle=":")
-    ax.set_xlabel("Baseline (CH1, tail)")
-    ax.set_title(f"CH1 tail baseline (μ±6σ, bins={bins_count})")
-    ax.set_xlim(xmin_b_ch1, xmax_b_ch1)
-    ax.grid(alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=legend_fs)
 
     plt.tight_layout()
     plt.show()

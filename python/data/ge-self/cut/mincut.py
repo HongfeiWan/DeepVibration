@@ -27,8 +27,12 @@ mincut 工具函数
 
 from __future__ import annotations
 
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Dict, Tuple, Union
 
+import h5py
+import matplotlib.pyplot as plt
 import numpy as np
 
 ArrayLike = Union[np.ndarray]
@@ -206,106 +210,121 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    """
-    使用真实 HDF5 事件数据做一个简单自测：
-    - 自动在 data/hdf5/raw_pulse/CH0-3 下寻找 h5 文件
-    - 读取其中 CH0/CH1 的波形作为 ACT 事例
-    - 使用 mincut_ch0_ch1_from_act 计算最小值分布
-    - 画出 CH0 / CH1 的最小值直方图，并标出 μ、μ±nσ
-    """
-    import os
-    import sys
-    import h5py
-    import matplotlib.pyplot as plt
+    def _discover_project_root() -> str:
+        here = os.path.abspath(__file__)
+        cut_dir = os.path.dirname(here)
+        ge_self_dir = os.path.dirname(cut_dir)
+        data_dir = os.path.dirname(ge_self_dir)
+        python_dir = os.path.dirname(data_dir)
+        return os.path.dirname(python_dir)
 
-    # 为了导入 utils.visualize 中的工具，补充项目根下的 python 目录到 sys.path
-    current_dir = os.path.dirname(os.path.abspath(__file__))          # .../python/data/ge-self/cut
-    data_dir = os.path.dirname(current_dir)                           # .../python/data/ge-self
-    python_dir = os.path.dirname(os.path.dirname(data_dir))           # .../python
-    if python_dir not in sys.path:
-        sys.path.insert(0, python_dir)
+    def _read_one_param_triplet(args: Tuple[str, str, str]) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        ch0_path, ch1_path, ch4_path = args
+        with h5py.File(ch0_path, "r") as f0, h5py.File(ch1_path, "r") as f1, h5py.File(ch4_path, "r") as f4:
+            for key in ("ch0_min",):
+                if key not in f0:
+                    raise KeyError(f"{os.path.basename(ch0_path)} 缺少数据集 {key}")
+            for key in ("ch1_min",):
+                if key not in f1:
+                    raise KeyError(f"{os.path.basename(ch1_path)} 缺少数据集 {key}")
+            for key in ("max_ch4", "tmax_ch4"):
+                if key not in f4:
+                    raise KeyError(f"{os.path.basename(ch4_path)} 缺少数据集 {key}")
+            ch0_min = np.asarray(f0["ch0_min"][...], dtype=np.float64)
+            ch1_min = np.asarray(f1["ch1_min"][...], dtype=np.float64)
+            max_ch4 = np.asarray(f4["max_ch4"][...], dtype=np.float64)
+            tmax_ch4 = np.asarray(f4["tmax_ch4"][...], dtype=np.float64)
+            n = min(ch0_min.size, ch1_min.size, max_ch4.size, tmax_ch4.size)
+            return ch0_min[:n], ch1_min[:n], max_ch4[:n], tmax_ch4[:n]
 
-    from utils.visualize import get_h5_files  # type: ignore[import]  # noqa: E402
+    def _cut_act(
+        max_ch4: np.ndarray,
+        tmax_ch4: np.ndarray,
+        trigger_threshold: float = 7060.0,
+        t_ge_us: float = 40.0,
+        sampling_interval_ns: float = 4.0,
+        dt_min_us: float = 1.0,
+        dt_max_us: float = 16.0,
+    ) -> np.ndarray:
+        nai_ok = max_ch4 >= trigger_threshold
+        t_ch4_us = tmax_ch4 * sampling_interval_ns * 1e-3
+        delta_t_us = t_ge_us - t_ch4_us
+        act_mask = (delta_t_us < dt_min_us) | (delta_t_us > dt_max_us)
+        return (~nai_ok) | (nai_ok & act_mask)
 
-    # 1. 自动查找 CH0-3 的 HDF5 文件
-    h5_files = get_h5_files()
-    if "CH0-3" not in h5_files or not h5_files["CH0-3"]:
-        raise FileNotFoundError("在 data/hdf5/raw_pulse/CH0-3 目录中未找到 h5 文件，无法进行自测")
+    project_root = _discover_project_root()
+    ch0_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH0_parameters")
+    ch1_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH1_parameters")
+    ch4_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH4_parameters")
+    if not os.path.isdir(ch0_dir) or not os.path.isdir(ch1_dir) or not os.path.isdir(ch4_dir):
+        raise FileNotFoundError("CH0_parameters / CH1_parameters / CH4_parameters 目录不存在。")
 
-    ch0_3_file = h5_files["CH0-3"][0]
+    ch0_files = sorted([n for n in os.listdir(ch0_dir) if n.lower().endswith((".h5", ".hdf5"))])
+    ch1_set = set(n for n in os.listdir(ch1_dir) if n.lower().endswith((".h5", ".hdf5")))
+    ch4_set = set(n for n in os.listdir(ch4_dir) if n.lower().endswith((".h5", ".hdf5")))
+    pairs = [
+        (os.path.join(ch0_dir, n), os.path.join(ch1_dir, n), os.path.join(ch4_dir, n))
+        for n in ch0_files if n in ch1_set and n in ch4_set
+    ]
+    if not pairs:
+        raise RuntimeError("未找到可配对的 CH0/CH1/CH4 参数文件。")
+
+    cpu_count = os.cpu_count() or 1
     print("=" * 70)
-    print("MinCut 自测：使用真实 HDF5 事件数据")
+    print(f"使用 CH0/CH1/CH4 参数文件并行绘图，文件对数: {len(pairs)}，CPU 核心: {cpu_count}")
     print("=" * 70)
-    print(f"使用文件（CH0-3）：{os.path.basename(ch0_3_file)}")
-    print(f"完整路径：{ch0_3_file}")
 
-    # 2. 读取 CH0/CH1 的波形数据，构造成 (n_samples, n_channels, n_events)
-    with h5py.File(ch0_3_file, "r") as f:
-        if "channel_data" not in f:
-            raise KeyError("HDF5 文件中未找到数据集 'channel_data'")
+    ch0_min_all = []
+    ch1_min_all = []
+    max_ch4_all = []
+    tmax_ch4_all = []
+    with ProcessPoolExecutor(max_workers=cpu_count) as ex:
+        fut_map = {ex.submit(_read_one_param_triplet, pair): pair for pair in pairs}
+        done = 0
+        for fut in as_completed(fut_map):
+            c0m, c1m, m4, t4 = fut.result()
+            ch0_min_all.append(c0m)
+            ch1_min_all.append(c1m)
+            max_ch4_all.append(m4)
+            tmax_ch4_all.append(t4)
+            done += 1
+            if done % 20 == 0 or done == len(pairs):
+                print(f"已完成 {done}/{len(pairs)} 文件对")
 
-        channel_data = f["channel_data"]
-        n_samples, n_channels, n_events = channel_data.shape
-        if n_channels < 2:
-            raise ValueError(f"CH0-3 文件通道数为 {n_channels} (<2)，无法同时分析 CH0/CH1")
+    amin_ch0_all = np.concatenate(ch0_min_all)
+    amin_ch1_all = np.concatenate(ch1_min_all)
+    max_ch4_all = np.concatenate(max_ch4_all)
+    tmax_ch4_all = np.concatenate(tmax_ch4_all)
+    act_mask = _cut_act(max_ch4_all, tmax_ch4_all)
+    pos_min_mask = (amin_ch0_all > 0.0) & (amin_ch1_all > 0.0)
+    vis_mask = act_mask & pos_min_mask
+    amin_ch0 = amin_ch0_all[vis_mask]
+    amin_ch1 = amin_ch1_all[vis_mask]
 
-        # 为了避免内存过大，自测时可以限制最大事件数
-        max_events = 20000
-        use_events = min(n_events, max_events)
-        print(f"总事件数: {n_events}，自测使用前 {use_events} 个事件")
+    mu_ch0 = float(amin_ch0.mean())
+    sigma_ch0 = float(amin_ch0.std(ddof=1))
+    mu_ch1 = float(amin_ch1.mean())
+    sigma_ch1 = float(amin_ch1.std(ddof=1))
+    lo_ch0 = mu_ch0 - 3.0 * sigma_ch0
+    hi_ch0 = mu_ch0 + 3.0 * sigma_ch0
+    lo_ch1 = mu_ch1 - 3.0 * sigma_ch1
+    hi_ch1 = mu_ch1 + 3.0 * sigma_ch1
 
-        # 只取 CH0/CH1 两个通道，并裁剪事件数
-        # 结果形状: (n_samples, 2, use_events)
-        phys_waveforms = channel_data[:, 0:2, 0:use_events].astype(np.float64)
+    nsigma_display = 6.0
+    bins_count = 100
+    xmin_ch0, xmax_ch0 = mu_ch0 - nsigma_display * sigma_ch0, mu_ch0 + nsigma_display * sigma_ch0
+    xmin_ch1, xmax_ch1 = mu_ch1 - nsigma_display * sigma_ch1, mu_ch1 + nsigma_display * sigma_ch1
 
-    # 这里能量只用于函数接口要求与后续可能的作图，本测试中用 0 占位
-    energy = np.zeros(phys_waveforms.shape[2], dtype=np.float64)
-
-    # 3. 计算 mincut 以及统计量
-    keep_mask, stats = mincut_ch0_ch1_from_act(
-        phys_waveforms,
-        energy,
-        min_window=(0, 200),
-        ch0_idx=0,
-        ch1_idx=1,
-        nsigma=3.0,
-    )
-
-    amin_ch0 = stats["amin_ch0"]
-    amin_ch1 = stats["amin_ch1"]
-    mu_ch0 = float(stats["mu_ch0"])
-    sigma_ch0 = float(stats["sigma_ch0"])
-    mu_ch1 = float(stats["mu_ch1"])
-    sigma_ch1 = float(stats["sigma_ch1"])
-    lo_ch0 = float(stats["lo_ch0"])
-    hi_ch0 = float(stats["hi_ch0"])
-    lo_ch1 = float(stats["lo_ch1"])
-    hi_ch1 = float(stats["hi_ch1"])
-
-    # 设置 x 轴范围为 μ±6σ，并增加 bin 数量
-    nsigma_display = 6.0  # 显示范围：μ±6σ
-    bins_count = 400  # 增加 bin 数量
-
-    # CH0 的范围
-    xmin_ch0 = mu_ch0 - nsigma_display * sigma_ch0
-    xmax_ch0 = mu_ch0 + nsigma_display * sigma_ch0
-
-    # CH1 的范围
-    xmin_ch1 = mu_ch1 - nsigma_display * sigma_ch1
-    xmax_ch1 = mu_ch1 + nsigma_display * sigma_ch1
+    print("=" * 70)
+    print(f"ACT 样本数: {amin_ch0.size}")
+    print(f"CH0 A_min: μ={mu_ch0:.3f}, σ={sigma_ch0:.3f}, 区间=[{lo_ch0:.3f}, {hi_ch0:.3f}]")
+    print(f"CH1 A_min: μ={mu_ch1:.3f}, σ={sigma_ch1:.3f}, 区间=[{lo_ch1:.3f}, {hi_ch1:.3f}]")
+    print("=" * 70)
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=False)
 
-    # CH0 minimum distribution
     ax0 = axes[0]
-    ax0.hist(
-        amin_ch0,
-        bins=bins_count,
-        range=(xmin_ch0, xmax_ch0),
-        histtype="step",
-        color="C0",
-        label="CH0 A_min",
-    )
+    ax0.hist(amin_ch0, bins=bins_count, range=(xmin_ch0, xmax_ch0), histtype="step", color="C0", label="CH0 A_min",linewidth=2.0)
     ax0.axvline(mu_ch0, color="C1", linestyle="--", label=r"$\mu$")
     ax0.axvline(lo_ch0, color="g", linestyle=":", label=r"$\mu \pm 3\sigma$")
     ax0.axvline(hi_ch0, color="g", linestyle=":")
@@ -315,21 +334,14 @@ if __name__ == "__main__":
     ax0.grid(True, alpha=0.3)
     ax0.legend()
 
-    # CH1 minimum distribution
     ax1 = axes[1]
-    ax1.hist(
-        amin_ch1,
-        bins=bins_count,
-        range=(xmin_ch1, xmax_ch1),
-        histtype="step",
-        color="C0",
-        label="CH1 A_min",
-    )
+    ax1.hist(amin_ch1, bins=bins_count, range=(xmin_ch1, xmax_ch1), histtype="step", color="C0", label="CH1 A_min",linewidth=2.0)
     ax1.axvline(mu_ch1, color="C1", linestyle="--", label=r"$\mu$")
     ax1.axvline(lo_ch1, color="g", linestyle=":", label=r"$\mu \pm 3\sigma$")
     ax1.axvline(hi_ch1, color="g", linestyle=":")
     ax1.set_xlabel("A_min (CH1)")
     ax1.set_xlim(xmin_ch1, xmax_ch1)
+    ax1.grid(True, alpha=0.3)
     ax1.legend()
 
     plt.tight_layout()

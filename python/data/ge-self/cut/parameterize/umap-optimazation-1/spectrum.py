@@ -164,6 +164,7 @@ def _plot_histogram(max_values: np.ndarray, bins: int = 100, cluster: int = 0) -
     fig, ax = plt.subplots(1, 1, figsize=(8, 6))
     ax.bar(bin_centers, rates, width=bin_widths, color="C0", alpha=0.8, align="center")
     ax.set_yscale("log")
+    ax.set_xlim(0,1)
     ax.set_xlabel("Energy (keV)", fontsize=12)
     ax.set_ylabel(r"Rate [counts / (keV·kg·day)]", fontsize=12)
     ax.set_title(f"Energy spectrum for cluster={cluster}", fontsize=13)
@@ -183,7 +184,7 @@ def _plot_histogram(max_values: np.ndarray, bins: int = 100, cluster: int = 0) -
         # 初始参数估计
         peak_idx = np.argmax(y_roi)
         mu0 = x_roi[peak_idx]
-        amp0 = y_roi[peak_idx] - np.min(y_roi)
+        amp0 = y_roi[peak_idx]
         sigma0 = 0.05  # keV，经验初始值
         c0 = np.min(y_roi)
         d0 = 0.0
@@ -197,7 +198,7 @@ def _plot_histogram(max_values: np.ndarray, bins: int = 100, cluster: int = 0) -
                 x_roi,
                 y_roi,
                 p0=[amp0, mu0, sigma0, c0, d0],
-                maxfev=10000,
+                maxfev=100000,
             )
             A_fit, mu_fit, sigma_fit, c_fit, d_fit = popt
 
@@ -287,7 +288,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--bins",
         type=int,
-        default=100,
+        default=1000,
         help="直方图的 bin 数（默认 100）。",
     )
     return parser.parse_args()

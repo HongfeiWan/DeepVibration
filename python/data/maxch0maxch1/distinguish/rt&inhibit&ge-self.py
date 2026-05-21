@@ -1,68 +1,140 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-对 HDF5 文件中所有事件绘制 PN-cut 散点图：
-- 读取数据集 `channel_data`，形状应为 (time_samples, num_channels, num_events)；
-- 选择 CH0 与 CH1 通道，计算每个事件的 max(CH0)、max(CH1)；
-- 绘制 max(CH0) vs max(CH1) 的散点图并保存。
+对 HDF5 参数文件中的事件绘制 PN-cut 散点图（不读原始波形）：
+- 从 data/hdf5/raw_pulse/CH0_parameters 读 max_ch0、ch0_min；
+- 从 CH1_parameters 读 max_ch1；
+- 从 CH5_parameters 读 max_ch5（用于 RT 判据）。
+数据集命名与 preprocessor.py 一致。
+
+批量模式：遍历 CH0_parameters 下所有 .h5，与同名的 CH1/CH5 参数文件对齐后汇总绘图（显示全部点）。
 """
 
-import os
+from __future__ import annotations
+
 import argparse
+import os
+from typing import Optional, Tuple
+
 import h5py
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+
+
+def _project_root() -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.abspath(os.path.join(script_dir, "..", "..", "..", ".."))
+
+
+def _param_paths(project_root: str) -> Tuple[str, str, str]:
+    root = os.path.join(project_root, "data", "hdf5", "raw_pulse")
+    return (
+        os.path.join(root, "CH0_parameters"),
+        os.path.join(root, "CH1_parameters"),
+        os.path.join(root, "CH5_parameters"),
+    )
+
+
+def load_pncut_arrays_from_params(
+    project_root: str,
+    base_name: str,
+) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+    """
+    从 raw_pulse 下各 *parameters 目录读取与 base_name 同名的 h5。
+    返回 (max_ch0, max_ch1, ch0_min, max_ch5)，长度对齐为各数组最小长度；
+    若缺少 CH0/CH1 参数文件或必要数据集则返回 None；
+    若缺少 CH5 参数文件，则 max_ch5 全 0（与原先不读 CH5 波形时的 RT 行为一致）。
+    """
+    ch0_dir, ch1_dir, ch5_dir = _param_paths(project_root)
+    ch0_path = os.path.join(ch0_dir, base_name)
+    ch1_path = os.path.join(ch1_dir, base_name)
+    ch5_path = os.path.join(ch5_dir, base_name)
+
+    if not os.path.isfile(ch0_path) or not os.path.isfile(ch1_path):
+        return None
+
+    with h5py.File(ch0_path, "r") as f0:
+        if "max_ch0" not in f0 or "ch0_min" not in f0:
+            return None
+        max_ch0 = np.asarray(f0["max_ch0"][...], dtype=np.float64)
+        ch0_min = np.asarray(f0["ch0_min"][...], dtype=np.float64)
+
+    with h5py.File(ch1_path, "r") as f1:
+        if "max_ch1" not in f1:
+            return None
+        max_ch1 = np.asarray(f1["max_ch1"][...], dtype=np.float64)
+
+    n = min(max_ch0.size, max_ch1.size, ch0_min.size)
+    max_ch0 = max_ch0[:n]
+    max_ch1 = max_ch1[:n]
+    ch0_min = ch0_min[:n]
+
+    if os.path.isfile(ch5_path):
+        with h5py.File(ch5_path, "r") as f5:
+            if "max_ch5" not in f5:
+                max_ch5 = np.zeros(n, dtype=np.float64)
+            else:
+                max_ch5 = np.asarray(f5["max_ch5"][...], dtype=np.float64)
+                n5 = min(n, max_ch5.size)
+                max_ch0 = max_ch0[:n5]
+                max_ch1 = max_ch1[:n5]
+                ch0_min = ch0_min[:n5]
+                max_ch5 = max_ch5[:n5]
+    else:
+        max_ch5 = np.zeros(n, dtype=np.float64)
+
+    return max_ch0, max_ch1, ch0_min, max_ch5
+
+
+def load_pncut_arrays_simple_from_params(
+    project_root: str,
+    base_name: str,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """仅 max_ch0 / max_ch1，用于单文件无分类散点图。"""
+    ch0_dir, ch1_dir, _ = _param_paths(project_root)
+    ch0_path = os.path.join(ch0_dir, base_name)
+    ch1_path = os.path.join(ch1_dir, base_name)
+    if not os.path.isfile(ch0_path) or not os.path.isfile(ch1_path):
+        return None
+    with h5py.File(ch0_path, "r") as f0:
+        if "max_ch0" not in f0:
+            return None
+        max_ch0 = np.asarray(f0["max_ch0"][...], dtype=np.float64)
+    with h5py.File(ch1_path, "r") as f1:
+        if "max_ch1" not in f1:
+            return None
+        max_ch1 = np.asarray(f1["max_ch1"][...], dtype=np.float64)
+    n = min(max_ch0.size, max_ch1.size)
+    return max_ch0[:n], max_ch1[:n]
+
 
 def plot_pncut_scatter(
     h5_path: str,
     ch0_idx: int = 0,
     ch1_idx: int = 1,
     save_path: str | None = None,
-    show: bool = True,) -> str:
+    show: bool = True,
+) -> str:
     """
-    对指定 HDF5 文件中所有事件，绘制 max(CH0) vs max(CH1) 散点图。
-
-    参数：
-        h5_path: HDF5 文件路径，需包含数据集 `channel_data`
-        ch0_idx: CH0 通道索引（默认 0）
-        ch1_idx: CH1 通道索引（默认 1）
-        save_path: 图片保存路径；为 None 时自动生成
-        show: 是否调用 plt.show()
-
-    返回：
-        实际保存的图片路径
+    对指定「运行」绘制 max(CH0) vs max(CH1) 散点图。
+    h5_path 可为 CH0-3 原始脉冲文件路径或任意同名 base 的路径；实际从 CH0_parameters / CH1_parameters 读取。
+    ch0_idx / ch1_idx 保留与旧接口兼容，此处忽略（通道由参数文件固定）。
     """
-    if not os.path.isfile(h5_path):
-        raise FileNotFoundError(f"HDF5 文件不存在: {h5_path}")
+    del ch0_idx, ch1_idx
+    base_name = os.path.basename(h5_path)
+    project_root = _project_root()
+    loaded = load_pncut_arrays_simple_from_params(project_root, base_name)
+    if loaded is None:
+        raise FileNotFoundError(
+            f"未找到或未完整读取参数文件（需 CH0_parameters 与 CH1_parameters 下同名 {base_name}，"
+            "且含数据集 max_ch0、max_ch1）"
+        )
+    max_ch0, max_ch1 = loaded
+    num_events = max_ch0.size
 
-    with h5py.File(h5_path, "r") as f:
-        if "channel_data" not in f:
-            raise KeyError("HDF5 文件中未找到数据集 'channel_data'")
+    print(f"参数文件 basename: {base_name}")
+    print(f"事件数: {num_events}")
 
-        channel_data = f["channel_data"]
-        if channel_data.ndim != 3:
-            raise ValueError(
-                f"'channel_data' 维度应为 3，当前为 {channel_data.ndim}，"
-                "预期形状 (time_samples, num_channels, num_events)"
-            )
-
-        time_samples, num_channels, num_events = channel_data.shape
-
-        if ch0_idx < 0 or ch0_idx >= num_channels:
-            raise ValueError(f"ch0_idx={ch0_idx} 超出通道数范围 [0, {num_channels-1}]")
-        if ch1_idx < 0 or ch1_idx >= num_channels:
-            raise ValueError(f"ch1_idx={ch1_idx} 超出通道数范围 [0, {num_channels-1}]")
-
-        # 读取全部事件的 CH0 / CH1 波形并计算最大值
-        ch0_waveforms = channel_data[:, ch0_idx, :].astype(np.float64)
-        ch1_waveforms = channel_data[:, ch1_idx, :].astype(np.float64)
-        max_ch0 = ch0_waveforms.max(axis=0)
-        max_ch1 = ch1_waveforms.max(axis=0)
-
-    print(f"读取文件: {h5_path}")
-    print(f"事件数: {num_events}，通道数: {num_channels}")
-
-    # 画散点
     plt.rcParams.update(
         {
             "font.family": "serif",
@@ -71,10 +143,10 @@ def plot_pncut_scatter(
     )
 
     fig, ax = plt.subplots(figsize=(7, 6))
-    sc = ax.scatter(
+    ax.scatter(
         max_ch0,
         max_ch1,
-        s=4,  # 点更小
+        s=4,
         alpha=0.6,
         c="tab:blue",
         edgecolors="none",
@@ -82,13 +154,11 @@ def plot_pncut_scatter(
 
     ax.set_xlabel("max CH0 (ADC)", fontsize=14, fontweight="bold")
     ax.set_ylabel("max CH1 (ADC)", fontsize=14, fontweight="bold")
-    # 去掉文件名，只保留整体标题
     ax.set_title(
-        "PN-cut Scatter: max CH0 vs max CH1",
+        "PN-cut Scatter: max CH0 vs max CH1 (from parameters)",
         fontsize=10,
         fontweight="bold",
     )
-    #ax.grid(True, alpha=0.3)
 
     for tick in ax.xaxis.get_major_ticks():
         tick.label1.set_fontweight("bold")
@@ -98,17 +168,12 @@ def plot_pncut_scatter(
     plt.tight_layout()
 
     if save_path is None:
-        # 推断项目根目录：.../python/data/pncut -> data -> python -> 项目根
-        pncut_dir = os.path.dirname(os.path.abspath(__file__))    # .../python/data/pncut
-        data_dir = os.path.dirname(pncut_dir)                     # .../python/data
-        python_dir = os.path.dirname(data_dir)                    # .../python
-        project_root = os.path.dirname(python_dir)                # 项目根
-
-        # 默认输出到 images/presentation 目录
+        pncut_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.dirname(pncut_dir)
+        python_dir = os.path.dirname(data_dir)
+        project_root = os.path.dirname(python_dir)
         output_dir = os.path.join(project_root, "images", "presentation")
         os.makedirs(output_dir, exist_ok=True)
-
-        base_name = os.path.splitext(os.path.basename(h5_path))[0]
         save_path = os.path.join(output_dir, f"pncut_scatter_{base_name}.png")
 
     fig.savefig(save_path, dpi=300, bbox_inches="tight", facecolor="white")
@@ -121,128 +186,72 @@ def plot_pncut_scatter(
 
     return save_path
 
+
 def plot_pncut_scatter_multi(
-    h5_paths: list[str],
-    ch0_idx: int = 0,
-    ch1_idx: int = 1,
+    base_names: Optional[list[str]] = None,
+    project_root: Optional[str] = None,
     save_path: str | None = None,
     show: bool = True,
 ) -> str:
     """
-    将多个 HDF5 文件中的事件汇总到一张 PN-cut 散点图上，
-    并根据 RT / Inhibit / ge-self 条件用不同颜色区分：
-    - RT:   CH5 最大值 > 6000 (蓝色点)
-    - Inhibit: CH0 最小值 == 0 (黑色点)
-    - ge-self (Physical): 既非 RT 也非 Inhibit (红色点)
-    """
-    if not h5_paths:
-        raise ValueError("h5_paths 为空，未提供任何 HDF5 文件路径。")
+    将多个运行中的事件汇总到一张 PN-cut 散点图上，
+    根据 RT / Inhibit / ge-self 条件着色（参数来自 HDF5，不读波形）：
+    - RT:   max_ch5 > 6000（蓝色）
+    - Inhibit: ch0_min == 0（黑色）
+    - ge-self: 既非 RT 也非 Inhibit（红色）
 
-    # 分类结果
+    base_names: 若为 None，则处理 CH0_parameters 目录下全部 .h5 文件名；
+    否则仅处理给定列表（不含路径，仅 basename）。
+    """
+    if project_root is None:
+        project_root = _project_root()
+    ch0_dir, _, _ = _param_paths(project_root)
+
+    if base_names is None:
+        if not os.path.isdir(ch0_dir):
+            raise FileNotFoundError(f"目录不存在: {ch0_dir}")
+        base_names = sorted(
+            n for n in os.listdir(ch0_dir) if n.lower().endswith(".h5")
+        )
+    if not base_names:
+        raise ValueError("未指定任何参数文件（base_names 为空）。")
+
+    rt_cut = 6000.0
     rt_x, rt_y = [], []
     inhibit_x, inhibit_y = [], []
     geself_x, geself_y = [], []
     total_events = 0
 
-    # 与 ge-self / RT / Inhibit 脚本保持一致的 RT 阈值
-    rt_cut = 6000.0
-
-    # 写死 CH5 目录：相对当前脚本向上四级即项目根，再拼接 data/hdf5/raw_pulse/CH5
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(script_dir, "..", "..", "..", ".."))
-    ch5_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH5")
-
-    for h5_path in h5_paths:
-        if not os.path.isfile(h5_path):
-            print(f"[警告] 跳过不存在的文件: {h5_path}")
+    for base_name in base_names:
+        loaded = load_pncut_arrays_from_params(project_root, base_name)
+        if loaded is None:
+            print(f"[警告] 跳过（缺 CH0/CH1 参数或数据集不全）: {base_name}")
+            continue
+        max_ch0, max_ch1, ch0_min, max_ch5 = loaded
+        num_events = max_ch0.size
+        if num_events == 0:
             continue
 
-        with h5py.File(h5_path, "r") as f_ch0:
-            if "channel_data" not in f_ch0:
-                print(f"[警告] 文件中未找到 'channel_data'，跳过: {h5_path}")
-                continue
+        rt_mask = max_ch5 > rt_cut
+        inhibit_mask = ch0_min == 0
+        geself_mask = (~rt_mask) & (~inhibit_mask)
 
-            channel_data = f_ch0["channel_data"]
-            if channel_data.ndim != 3:
-                print(
-                    f"[警告] 'channel_data' 维度应为 3，当前为 {channel_data.ndim}，跳过: {h5_path}"
-                )
-                continue
+        rt_x.append(max_ch0[rt_mask])
+        rt_y.append(max_ch1[rt_mask])
+        inhibit_x.append(max_ch0[inhibit_mask])
+        inhibit_y.append(max_ch1[inhibit_mask])
+        geself_x.append(max_ch0[geself_mask])
+        geself_y.append(max_ch1[geself_mask])
 
-            _, num_channels, num_events = channel_data.shape
-
-            if ch0_idx < 0 or ch0_idx >= num_channels:
-                print(
-                    f"[警告] ch0_idx={ch0_idx} 超出通道数范围 [0, {num_channels-1}]，跳过: {h5_path}"
-                )
-                continue
-            if ch1_idx < 0 or ch1_idx >= num_channels:
-                print(
-                    f"[警告] ch1_idx={ch1_idx} 超出通道数范围 [0, {num_channels-1}]，跳过: {h5_path}"
-                )
-                continue
-
-            # 计算 max CH0 / max CH1
-            ch0_waveforms = channel_data[:, ch0_idx, :].astype(np.float64)
-            ch1_waveforms = channel_data[:, ch1_idx, :].astype(np.float64)
-            max_ch0 = ch0_waveforms.max(axis=0)
-            max_ch1 = ch1_waveforms.max(axis=0)
-
-            # 计算 CH0 最小值（用于 Inhibit 判据）
-            ch0_min_values = ch0_waveforms.min(axis=0)
-
-            # 尝试找到对应的 CH5 文件并计算 max CH5（用于 RT 判据）
-            ch5_path = os.path.join(ch5_dir, os.path.basename(h5_path))
-            if os.path.isfile(ch5_path):
-                with h5py.File(ch5_path, "r") as f_ch5:
-                    if "channel_data" not in f_ch5:
-                        print(f"[警告] CH5 文件中未找到 'channel_data'，跳过 RT 判据: {ch5_path}")
-                        ch5_max_values = np.zeros(num_events, dtype=np.float64)
-                    else:
-                        ch5_channel_data = f_ch5["channel_data"]
-                        if ch5_channel_data.ndim != 3:
-                            print(
-                                f"[警告] CH5 'channel_data' 维度应为 3，当前为 {ch5_channel_data.ndim}，跳过 RT 判据: {ch5_path}"
-                            )
-                            ch5_max_values = np.zeros(num_events, dtype=np.float64)
-                        else:
-                            ts5, n_ch5, n_evt5 = ch5_channel_data.shape
-                            if n_evt5 != num_events:
-                                print(
-                                    f"[警告] CH5 事件数 ({n_evt5}) 与 CH0-3 ({num_events}) 不一致，跳过 RT 判据: {ch5_path}"
-                                )
-                                ch5_max_values = np.zeros(num_events, dtype=np.float64)
-                            else:
-                                # 假设 CH5 文件只有一个物理通道（索引 0）
-                                ch5_waveforms = ch5_channel_data[:, 0, :].astype(np.float64)
-                                ch5_max_values = ch5_waveforms.max(axis=0)
-            else:
-                print(f"[警告] 未找到对应的 CH5 文件，跳过 RT 判据: {ch5_path}")
-                ch5_max_values = np.zeros(num_events, dtype=np.float64)
-
-            # 根据条件分类
-            rt_mask = ch5_max_values > rt_cut
-            inhibit_mask = ch0_min_values == 0
-            geself_mask = (~rt_mask) & (~inhibit_mask)
-
-            # 各类事件的坐标
-            rt_x.append(max_ch0[rt_mask])
-            rt_y.append(max_ch1[rt_mask])
-            inhibit_x.append(max_ch0[inhibit_mask])
-            inhibit_y.append(max_ch1[inhibit_mask])
-            geself_x.append(max_ch0[geself_mask])
-            geself_y.append(max_ch1[geself_mask])
-
-            total_events += num_events
-            print(
-                f"读取文件: {h5_path} | 事件数: {num_events}，"
-                f"RT: {rt_mask.sum()}，Inhibit: {inhibit_mask.sum()}，ge-self: {geself_mask.sum()}"
-            )
+        total_events += num_events
+        print(
+            f"参数文件: {base_name} | 事件数: {num_events}，"
+            f"RT: {rt_mask.sum()}，Inhibit: {inhibit_mask.sum()}，ge-self: {geself_mask.sum()}"
+        )
 
     if total_events == 0:
-        raise RuntimeError("没有任何有效的 HDF5 文件被成功读取，无法绘图。")
+        raise RuntimeError("没有任何有效的参数文件被成功读取，无法绘图。")
 
-    # 拼接所有文件的数据
     def _concat(arrs: list[np.ndarray]) -> np.ndarray:
         return np.concatenate(arrs) if arrs else np.array([], dtype=np.float64)
 
@@ -253,7 +262,6 @@ def plot_pncut_scatter_multi(
     ges_x_all = _concat(geself_x)
     ges_y_all = _concat(geself_y)
 
-    # 画散点（按类别着色）
     plt.rcParams.update(
         {
             "font.family": "serif",
@@ -263,20 +271,17 @@ def plot_pncut_scatter_multi(
 
     fig, ax = plt.subplots(figsize=(7, 6))
 
-    # RT：蓝色
     if rt_x_all.size > 0:
         ax.scatter(rt_x_all, rt_y_all, s=2, alpha=0.6, c="tab:blue", edgecolors="none", label="RT")
-    # Inhibit：黑色
     if inh_x_all.size > 0:
         ax.scatter(inh_x_all, inh_y_all, s=2, alpha=0.6, c="black", edgecolors="none", label="Inhibit")
-    # ge-self：红色
     if ges_x_all.size > 0:
         ax.scatter(ges_x_all, ges_y_all, s=2, alpha=0.6, c="tab:red", edgecolors="none", label="ge-self")
 
     ax.set_xlabel("max CH0 (ADC)", fontsize=14, fontweight="bold")
     ax.set_ylabel("max CH1 (ADC)", fontsize=14, fontweight="bold")
     ax.set_title(
-        "PN-cut Scatter: max CH0 vs max CH1\n(RT / Inhibit / ge-self)",
+        "PN-cut Scatter: max CH0 vs max CH1\n(RT / Inhibit / ge-self, from parameters)",
         fontsize=11,
         fontweight="bold",
     )
@@ -287,38 +292,37 @@ def plot_pncut_scatter_multi(
     for tick in ax.yaxis.get_major_ticks():
         tick.label1.set_fontweight("bold")
 
-    if any([
-        rt_x_all.size > 0,
-        inh_x_all.size > 0,
-        ges_x_all.size > 0,
-    ]):
-        # 图例中点的大小调大一些（markerscale > 1）
+    if any([rt_x_all.size > 0, inh_x_all.size > 0, ges_x_all.size > 0]):
         ax.legend(loc="best", fontsize=9, markerscale=3)
 
     plt.tight_layout()
 
     if save_path is None:
-        # 写死输出目录：项目根下的 images/presentation
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.abspath(os.path.join(script_dir, "..", "..", "..", ".."))
-        output_dir = os.path.join(project_root, "images", "presentation")
+        pr = os.path.abspath(os.path.join(script_dir, "..", "..", "..", ".."))
+        output_dir = os.path.join(pr, "images", "presentation")
         os.makedirs(output_dir, exist_ok=True)
-
         save_path = os.path.join(output_dir, "pncut_scatter_CH0-3_all.png")
 
-    fig.savefig(save_path, dpi=300, bbox_inches="tight", facecolor="white")
-    print(f"已保存至: {save_path}")
+    # fig.savefig(save_path, dpi=300, bbox_inches="tight", facecolor="white")
+    # print(f"已保存至: {save_path}（总事件数 {total_events}）")
 
     if show:
+        ax.set_xlim(0, 16382)
+        ax.set_ylim(0, 16382)
         plt.show()
     else:
         plt.close(fig)
 
     return save_path
 
+
 def _build_argparser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="对 HDF5 文件所有事件绘制 max(CH0) vs max(CH1) PN-cut 散点图。"
+        description=(
+            "从 data/hdf5/raw_pulse/*_parameters 读取 per-event 参数，"
+            "绘制 max(CH0) vs max(CH1) PN-cut 散点图（不读取 channel_data 波形）。"
+        )
     )
     parser.add_argument(
         "--file",
@@ -326,20 +330,23 @@ def _build_argparser() -> argparse.ArgumentParser:
         dest="h5_path",
         required=False,
         default=None,
-        help="输入 HDF5 文件路径（需包含数据集 'channel_data'）；"
-        "若不提供，则默认读取 data/hdf5/raw_pulse/CH0-3 目录下的所有 .h5 文件并汇总绘制。",
+        help=(
+            "单个运行的 h5 文件名或路径（取 basename）；"
+            "从 CH0_parameters / CH1_parameters 读 max_ch0、max_ch1。"
+            "若不提供，则批量读取 CH0_parameters 下全部 .h5 并汇总为 RT/Inhibit/ge-self 分类图。"
+        ),
     )
     parser.add_argument(
         "--ch0-idx",
         type=int,
         default=0,
-        help="CH0 通道索引（默认 0）",
+        help="保留兼容，忽略（通道由参数文件固定）。",
     )
     parser.add_argument(
         "--ch1-idx",
         type=int,
         default=1,
-        help="CH1 通道索引（默认 1）",
+        help="保留兼容，忽略。",
     )
     parser.add_argument(
         "--output",
@@ -350,33 +357,13 @@ def _build_argparser() -> argparse.ArgumentParser:
     )
     return parser
 
+
 if __name__ == "__main__":
     args = _build_argparser().parse_args()
 
-    # 若未指定单个文件，则默认读取 data/hdf5/raw_pulse/CH0-3 下的所有 .h5 文件并汇总到一张图中
     if args.h5_path is None:
-        # 写死 CH0-3 目录：相对当前脚本向上四级即项目根，再拼接 data/hdf5/raw_pulse/CH0-3
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.path.abspath(os.path.join(script_dir, "..", "..", "..", ".."))
-        ch_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH0-3")
-
-        all_h5_paths = [
-            os.path.join(ch_dir, name)
-            for name in sorted(os.listdir(ch_dir))
-            if name.lower().endswith(".h5")
-        ]
-
-        # 若默认目录中的 h5 文件数大于 20，只取前 20 个进行绘制
-        if len(all_h5_paths) > 20:
-            print(f"在目录 {ch_dir} 中共找到 {len(all_h5_paths)} 个 .h5 文件，仅使用前 20 个进行绘图。")
-            h5_paths = all_h5_paths[:20]
-        else:
-            h5_paths = all_h5_paths
-
         plot_pncut_scatter_multi(
-            h5_paths=h5_paths,
-            ch0_idx=args.ch0_idx,
-            ch1_idx=args.ch1_idx,
+            base_names=None,
             save_path=args.save_path,
             show=True,
         )
@@ -388,4 +375,3 @@ if __name__ == "__main__":
             save_path=args.save_path,
             show=True,
         )
-
