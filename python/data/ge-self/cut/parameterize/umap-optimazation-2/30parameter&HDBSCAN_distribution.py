@@ -322,7 +322,7 @@ def _plot_feature_distributions_by_cluster(
 
                 ax.hist(
                     data,
-                    bins=50,
+                    bins=500,
                     histtype="step",
                     linewidth=1.0,
                     alpha=0.9 if lab != -1 else 0.6,

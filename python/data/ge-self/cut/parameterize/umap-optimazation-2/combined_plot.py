@@ -3,10 +3,10 @@
 """
 combined_plot.py
 
-将 MATLAB .fig 能谱曲线与 combine_spectrum 能谱（cluster + basic+act）绘制在同一坐标轴内，
-便于直接对比（柱状图在下、曲线在上）。
+将 MATLAB .fig 能谱与 combine_spectrum 的 UMAP cluster 能谱画在同一坐标轴内。
 
-可选：--scatter 额外输出 CH0max vs CH1max 散点图。
+- 不绘制 Python 侧的 basic+act cuts 能谱柱。
+- MATLAB：raw data、basic cut 等仍为曲线/误差棒；“basic cut + ACV” 仅绘制成散点。
 """
 
 from __future__ import annotations
@@ -24,6 +24,9 @@ import combine_spectrum as cs
 ENERGY_A = cs.ENERGY_A
 ENERGY_B = cs.ENERGY_B
 
+# MATLAB 图例中 “basic cut + ACV” 的 DisplayName（与 read_matlab_fig 默认一致）
+_MATLAB_ACV_NAME = "basic cut + ACV"
+
 
 def _draw_matlab_series_only(
     ax: plt.Axes,
@@ -32,7 +35,7 @@ def _draw_matlab_series_only(
     *,
     zorder: float = 4,
 ) -> None:
-    """仅绘制 MATLAB 曲线，不设置坐标轴范围与图例。"""
+    """绘制 MATLAB 曲线；其中 “basic cut + ACV” 仅画散点，其余为 errorbar/plot。"""
     y_is_log = axes_info.get("yscale", "linear") == "log"
 
     for i, s in enumerate(series):
@@ -42,6 +45,23 @@ def _draw_matlab_series_only(
         x, y = x[:n], y[:n]
         label = str(s.get("display_name", "")).strip() or f"{s.get('type', 'series')}[{i}]"
         fmt, markersize = "o", 1.8
+        is_acv = label == _MATLAB_ACV_NAME
+
+        if is_acv:
+            if y_is_log:
+                ok = y > 0
+                x, y = x[ok], y[ok]
+            ax.scatter(
+                x,
+                y,
+                s=12,
+                c="C2",
+                alpha=0.85,
+                edgecolors="none",
+                label=label,
+                zorder=zorder + 0.5,
+            )
+            continue
 
         if "l_data" in s and "u_data" in s:
             lo = np.asarray(s["l_data"], dtype=np.float64).ravel()
@@ -69,23 +89,16 @@ def _draw_combine_spectrum_only(
     bin_centers: np.ndarray,
     bin_widths: np.ndarray,
     rates_cluster: np.ndarray,
-    rates_basic: np.ndarray,
     cluster: int,
     *,
     zorder: float = 1,
 ) -> None:
-    """仅绘制 combine 柱状图，不设置坐标轴范围与图例。"""
+    """仅绘制 UMAP cluster 能谱柱（不绘制 basic+act cuts）。"""
     ax.bar(
         bin_centers, rates_cluster, width=bin_widths,
         color="C0", alpha=0.45, align="center",
         label=f"UMAP+HDBSCAN cluster={cluster}",
         zorder=zorder,
-    )
-    ax.bar(
-        bin_centers, rates_basic, width=bin_widths,
-        color="C1", alpha=0.45, align="center",
-        label="basic+act cuts",
-        zorder=zorder + 0.1,
     )
 
 
@@ -112,7 +125,7 @@ def _load_combine_spectrum_data(
     hdf5_path: Path,
     cluster: int,
     bins: int,
-) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     if not hdf5_path.exists():
         print(f"[combine_spectrum] 事件映射 HDF5 不存在: {hdf5_path}")
         return None
@@ -128,23 +141,15 @@ def _load_combine_spectrum_data(
         target_cluster=cluster,
     )
     energy_cluster = ENERGY_A * max_values_cluster + ENERGY_B
-    passed_max_ch0, passed_max_ch1, energy_basic = cs._load_basic_act_pass_events()
-
-    energy_all = (
-        np.concatenate([energy_cluster, energy_basic])
-        if energy_basic.size > 0
-        else energy_cluster
-    )
-    if energy_all.size == 0:
+    if energy_cluster.size == 0:
         print("[combine_spectrum] 无可用事件。")
         return None
 
-    bin_edges = np.histogram_bin_edges(energy_all, bins=bins)
+    bin_edges = np.histogram_bin_edges(energy_cluster, bins=bins)
     bin_centers, bin_widths, rates_cluster = cs._compute_rates_from_energy(
         energy_cluster, bin_edges
     )
-    _, _, rates_basic = cs._compute_rates_from_energy(energy_basic, bin_edges)
-    return bin_edges, bin_centers, bin_widths, rates_cluster, rates_basic
+    return bin_edges, bin_centers, bin_widths, rates_cluster
 
 
 def _collect_positive_y_from_matlab(
@@ -179,7 +184,7 @@ def plot_spectrum_comparison(
     dpi: int = 150,
 ) -> None:
     """
-    将 MATLAB .fig 与 combine_spectrum 能谱绘制在同一坐标轴内。
+    将 MATLAB .fig 与 combine_spectrum（仅 cluster）能谱绘制在同一坐标轴内。
     """
     matlab_series, matlab_axinfo = _load_matlab_data(
         fig_path, plot_all=plot_all, no_child_lines=True
@@ -197,15 +202,14 @@ def plot_spectrum_comparison(
 
     bin_edges: Optional[np.ndarray] = None
     if has_cs:
-        bin_edges, bin_centers, bin_widths, rates_cluster, rates_basic = cs_data
+        bin_edges, bin_centers, bin_widths, rates_cluster = cs_data
         _draw_combine_spectrum_only(
-            ax, bin_centers, bin_widths, rates_cluster, rates_basic, cluster
+            ax, bin_centers, bin_widths, rates_cluster, cluster
         )
 
     if has_matlab:
         _draw_matlab_series_only(ax, matlab_series, matlab_axinfo, zorder=4)
 
-    # 仅一侧数据时沿用该侧轴样式
     if has_matlab and not has_cs:
         if matlab_axinfo.get("yscale", "linear") == "log":
             ax.set_yscale("log")
@@ -226,9 +230,8 @@ def plot_spectrum_comparison(
             ax.set_xlim(float(bin_edges[0]), float(bin_edges[-1]))
         ax.set_xlabel("Energy (keV)", fontsize=12)
         ax.set_ylabel(r"Rate [counts / (keV·kg·day)]", fontsize=12)
-        ax.set_title("UMAP+HDBSCAN cluster vs basic+act", fontsize=12)
+        ax.set_title("UMAP+HDBSCAN cluster", fontsize=12)
     else:
-        # 合并：对数 y，x/y 范围取并集
         ax.set_yscale("log")
         assert bin_edges is not None
         x_lo = float(bin_edges[0])
@@ -240,8 +243,7 @@ def plot_spectrum_comparison(
         ax.set_xlim(x_lo, x_hi)
 
         y_candidates: List[float] = []
-        r = np.concatenate([rates_cluster, rates_basic])
-        r = r[np.isfinite(r) & (r > 0)]
+        r = rates_cluster[np.isfinite(rates_cluster) & (rates_cluster > 0)]
         if r.size:
             y_candidates.extend([float(r.min()), float(r.max())])
         ym = _collect_positive_y_from_matlab(matlab_series, matlab_axinfo)
@@ -258,7 +260,7 @@ def plot_spectrum_comparison(
 
         ax.set_xlabel("Energy (keV)", fontsize=12)
         ax.set_ylabel(r"Rate [counts / (keV·kg·day)]", fontsize=12)
-        ax.set_title("能谱对比：MATLAB .fig + UMAP cluster / basic+act", fontsize=12)
+        ax.set_title("能谱对比：MATLAB .fig + UMAP cluster", fontsize=12)
     ax.legend(loc="best", fontsize=7, ncol=2)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
@@ -274,19 +276,14 @@ def parse_args() -> argparse.Namespace:
     default_fig = here / "DZL_vetospec_12kev_0615.fig"
 
     parser = argparse.ArgumentParser(
-        description="将 MATLAB .fig 与 combine_spectrum 能谱绘制在同一坐标轴内"
+        description="MATLAB .fig + UMAP cluster 能谱（不绘制 basic+act cuts）"
     )
     parser.add_argument("--fig", type=Path, default=default_fig, help="MATLAB .fig 路径")
     parser.add_argument("--hdf5", type=Path, default=None, help="事件映射 HDF5 路径")
-    parser.add_argument("--cluster", type=int, default=3, help="cluster label")
+    parser.add_argument("--cluster", type=int, default=0, help="cluster label")
     parser.add_argument("--bins", type=int, default=500, help="能谱 bin 数")
     parser.add_argument("--plot-all", action="store_true", help="MATLAB .fig 绘制全部序列")
     parser.add_argument("--save", type=Path, default=None, help="保存路径")
-    parser.add_argument(
-        "--scatter",
-        action="store_true",
-        help="额外输出 CH0max vs CH1max 散点图",
-    )
     return parser.parse_args()
 
 
@@ -305,17 +302,6 @@ def main() -> None:
         plot_all=args.plot_all,
         save_path=args.save,
     )
-
-    if args.scatter:
-        passed_max_ch0, passed_max_ch1, _ = cs._load_basic_act_pass_events()
-        if passed_max_ch0.size > 0:
-            plt.figure(figsize=(8, 6))
-            plt.scatter(passed_max_ch0, passed_max_ch1, s=2, alpha=0.5, edgecolors="none")
-            plt.xlabel("CH0 maximum amplitude (FADC)")
-            plt.ylabel("CH1 maximum amplitude (FADC)")
-            plt.title(f"CH0max vs CH1max (basic+act cuts, N={passed_max_ch0.size})")
-            plt.tight_layout()
-            plt.show()
 
     print("combined_plot 完成。")
 

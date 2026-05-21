@@ -33,6 +33,7 @@ import hdbscan
 from sklearn.preprocessing import StandardScaler
 from sklearn.neighbors import KNeighborsClassifier
 import matplotlib.pyplot as plt
+from scipy.optimize import curve_fit
 
 @dataclass
 class RunParameters:
@@ -350,6 +351,27 @@ def load_run_parameters(base_name: str) -> RunParameters:
         feature_names=feature_names,
     )
 
+
+def _align_run_to_feature_union(
+    run_params: RunParameters,
+    feature_names_union: List[str],
+    fill_value: float = np.nan,
+) -> np.ndarray:
+    """
+    将单个 run 的特征矩阵按“全局特征并集”顺序对齐：
+    - run 缺失的维度填充为 fill_value；
+    - run 额外维度（理论上不会额外）忽略。
+    """
+    n_events = run_params.n_events
+    aligned = np.full((n_events, len(feature_names_union)), fill_value, dtype=np.float64)
+    name_to_idx = {n: i for i, n in enumerate(run_params.feature_names)}
+    for j, feat_name in enumerate(feature_names_union):
+        src_idx = name_to_idx.get(feat_name)
+        if src_idx is None:
+            continue
+        aligned[:, j] = run_params.feature_matrix[:, src_idx]
+    return aligned
+
 def run_umap_hdbscan(
     features: np.ndarray,
     n_neighbors: int = 15,
@@ -394,8 +416,7 @@ def _fit_umap_hdbscan_on_sample(
     n_neighbors: int = 15,
     min_dist: float = 0.1,
     min_cluster_size: int = 50,
-    min_samples: int = None,
-) -> Tuple[umap.UMAP, hdbscan.HDBSCAN, np.ndarray, np.ndarray]:
+    min_samples: int = None,) -> Tuple[umap.UMAP, hdbscan.HDBSCAN, np.ndarray, np.ndarray]:
     """
     仅在抽样子集上拟合 UMAP 和 HDBSCAN，返回训练好的模型，供后续外推使用。
     HDBSCAN 固定使用 prediction_data=True，以支持 approximate_predict。
@@ -425,7 +446,6 @@ def _fit_umap_hdbscan_on_sample(
     labels_s = clusterer.fit_predict(embedding_s)
     return reducer, clusterer, embedding_s, labels_s
 
-
 def _resolve_extrapolate_n_jobs(n_jobs: int) -> int:
     """n_jobs=-1 表示使用全部逻辑 CPU；0 或 1 表示单进程顺序外推。"""
     if n_jobs == 0 or n_jobs == 1:
@@ -434,17 +454,14 @@ def _resolve_extrapolate_n_jobs(n_jobs: int) -> int:
         return max(1, os.cpu_count() or 1)
     return max(1, int(n_jobs))
 
-
 def _split_index_ranges(n: int, n_parts: int) -> List[Tuple[int, int]]:
     """将 [0, n) 均分为 n_parts 段，返回 [(start, end), ...]，end 为开区间。"""
     n_parts = min(max(1, n_parts), n)
     edges = np.linspace(0, n, n_parts + 1, dtype=np.int64)
     return [(int(edges[i]), int(edges[i + 1])) for i in range(n_parts)]
 
-
 def _extrapolate_one_chunk_worker(
-    args: Tuple[umap.UMAP, KNeighborsClassifier, np.ndarray],
-) -> Tuple[np.ndarray, np.ndarray]:
+    args: Tuple[umap.UMAP, KNeighborsClassifier, np.ndarray],) -> Tuple[np.ndarray, np.ndarray]:
     """
     多进程 worker：对一块 X_remaining 做 UMAP transform + KNN 预测。
     必须在模块顶层以便 pickle/spawn。
@@ -454,7 +471,6 @@ def _extrapolate_one_chunk_worker(
     lab_batch = knn.predict(emb_batch).astype(np.int32)
     return emb_batch.astype(np.float32), lab_batch
 
-
 def extrapolate_cluster_labels(
     reducer: umap.UMAP,
     embedding_train: np.ndarray,
@@ -462,8 +478,7 @@ def extrapolate_cluster_labels(
     X_remaining: np.ndarray,
     batch_size: int = 50000,
     knn_neighbors: int = 15,
-    n_jobs: int = -1,
-) -> Tuple[np.ndarray, np.ndarray]:
+    n_jobs: int = -1,) -> Tuple[np.ndarray, np.ndarray]:
     """
     对未参与训练的样本进行 UMAP transform，再用 KNN 在训练集嵌入上投票分配 cluster 标签。
     UMAP transform 会把新点投影到训练嵌入的 periphery，导致 approximate_predict 几乎全判为 noise。
@@ -535,8 +550,7 @@ def _test_umap_with_selected_features(
     max_points: int = 100000,
     extrapolate_batch_size: int = 50000,
     extrapolate_n_jobs: int = -1,
-    random_state: int = 42,
-) -> Tuple[np.ndarray, np.ndarray]:
+    random_state: int = 42,) -> Tuple[np.ndarray, np.ndarray]:
     """
     临时测试函数：仅使用 15 个物理上最重要的特征做 UMAP+HDBSCAN。
     当 do_sampling=True 且 n_events > max_points 时，采用「抽样训练 + 分批外推」流程：
@@ -629,7 +643,7 @@ def _test_umap_with_selected_features(
     #   - <1.0  表示“弱化”该维度（接近 0 相当于忽略）
     # ------------------------------------------------------------------
     weights = np.array([
-        1.0,  # 0  ch0_max_ch0             ：总幅度，决定能量               没那么重要    
+        0.0,  # 0  ch0_max_ch0             ：总幅度，决定能量               没那么重要    
         0.0,  # 1  ch0_ch0ped_mean         ：基线平均值，区分基线偏移        没那么重要
         1.0,  # 2  ch0_ch0pedt_mean        ：时间窗内基线平均，抑制慢漂移     没那么重要
         1.0,  # 3  ch0_ch0ped_var          ：基线方差，反映噪声水平          没那么重要
@@ -755,7 +769,7 @@ def cut_ch5_self_trigger(max_ch5: np.ndarray, rt_threshold: float = 6000.0) -> n
     """
     return max_ch5 <= rt_threshold
 
-def cut_act(
+def cut_acv(
     max_ch4: np.ndarray,
     tmax_ch4: np.ndarray,
     trigger_threshold: float = 7060.0,
@@ -764,12 +778,12 @@ def cut_act(
     dt_min_us: float = 1.0,
     dt_max_us: float = 16.0,) -> np.ndarray:
     """
-    ACT cut：
+    acv cut：
     - 对 NaI 过阈事件 (max_ch4 >= trigger_threshold)，选取 Δt 非 [dt_min_us, dt_max_us] μs 的事例（反符合）；
     - 对 NaI 未过阈事件，视为“非 ACV 约束”，一律保留。
     参考 acv.py：Δt = t_Ge - t_CH4，t_CH4(μs) = tmax_ch4 * sampling_interval_ns * 1e-3。
     输入: max_ch4, tmax_ch4
-    输出: bool 掩码（True = 通过 ACT cut 的事例）
+    输出: bool 掩码（True = 通过 acv cut 的事例）
     """
     n = max_ch4.shape[0]
     tmax_ch4 = np.asarray(tmax_ch4, dtype=np.float64)[:n]
@@ -778,12 +792,179 @@ def cut_act(
     nai_ok = max_ch4 >= trigger_threshold
     t_ch4_us = tmax_ch4 * sampling_interval_ns * 1e-3
     delta_t_us = t_ge_us - t_ch4_us
-    # 对 NaI 过阈事件：ACT = Δt 非 [dt_min_us, dt_max_us] 范围
-    act_mask = (delta_t_us < dt_min_us) | (delta_t_us > dt_max_us)
+    # 对 NaI 过阈事件：acv = Δt 非 [dt_min_us, dt_max_us] 范围
+    acv_mask = (delta_t_us < dt_min_us) | (delta_t_us > dt_max_us)
     # 最终通过条件：
     # - NaI 未过阈（nai_ok == False）：全部保留；
-    # - NaI 过阈（nai_ok == True）：要求满足 act_mask。
-    return (~nai_ok) | (nai_ok & act_mask)
+    # - NaI 过阈（nai_ok == True）：要求满足 acv_mask。
+    return (~nai_ok) | (nai_ok & acv_mask)
+
+def cut_ch0max_tmax(
+    base_mask: np.ndarray,
+    max_ch0: np.ndarray,
+    tmax_ch0: np.ndarray,
+    fit_x_min: float = 1160.0,
+    fit_y_min: float = 10200.0,
+    fit_y_max: float = 13500.0,
+    n_sigma: float = 3.0,
+    min_fit_events: int = 10,) -> np.ndarray:
+    """
+    CH0 max vs tmax(CH0) 相关带 cut（与 maxch0-tmax 相同模型与拟合窗口）：
+    在 base_mask 为 True 且 x∈(fit_x_min,∞)、y∈(fit_y_min, fit_y_max) 的子集上拟合
+    y = a·ln(x−b) + c·x + d/x；σ 为拟合残差标准差；
+    保留 |tmax_ch0 − ŷ(max_ch0)| <= n_sigma * σ 的事件（默认 3σ，与图中红色带一致）。
+    若拟合样本不足、curve_fit 失败或 σ=0，则返回与 base_mask 相同的掩码（不额外剔除）。
+    对 max_ch0 <= b 无法定义 ŷ 的位置，视为不通过本 cut（False）。
+    输入: base_mask, max_ch0, tmax_ch0
+    输出: bool 掩码
+    """
+    def _model(
+        x: np.ndarray, a: float, b: float, c: float, d: float
+    ) -> np.ndarray:
+        """y = a·ln(x−b) + c·x + d/x，要求 x > b（与 maxch0-tmax 一致）。"""
+        return a * np.log(x - b) + c * x + d / x
+
+    n = max_ch0.shape[0]
+    assert tmax_ch0.shape[0] == n and base_mask.shape[0] == n
+
+    max_ch0 = np.asarray(max_ch0, dtype=np.float64)
+    tmax_ch0 = np.asarray(tmax_ch0, dtype=np.float64)
+
+    fit_mask = (
+        base_mask
+        & (max_ch0 > fit_x_min)
+        & (tmax_ch0 > fit_y_min)
+        & (tmax_ch0 < fit_y_max)
+    )
+    xf = max_ch0[fit_mask]
+    yf = tmax_ch0[fit_mask]
+    if xf.size < max(4, min_fit_events):
+        return base_mask.copy()
+
+    xmin = float(np.min(xf))
+    b_hi = xmin - 1e-9
+    A0 = np.column_stack([np.log(xf), xf, 1.0 / xf])
+    coef0, _, rank0, _ = np.linalg.lstsq(A0, yf, rcond=None)
+    if rank0 < 3:
+        return base_mask.copy()
+    a0, c0, d0 = float(coef0[0]), float(coef0[1]), float(coef0[2])
+    b0 = min(xmin * 0.5, xmin - 200.0)
+    p0 = np.array([a0, b0, c0, d0], dtype=np.float64)
+    bounds = (
+        [-np.inf, -np.inf, -np.inf, -np.inf],
+        [np.inf, b_hi, np.inf, np.inf],
+    )
+    try:
+        popt, _ = curve_fit(
+            _model,
+            xf,
+            yf,
+            p0=p0,
+            bounds=bounds,
+            maxfev=100000,
+        )
+    except (ValueError, RuntimeError):
+        return base_mask.copy()
+    a, b, c, d = float(popt[0]), float(popt[1]), float(popt[2]), float(popt[3])
+    if not np.isfinite([a, b, c, d]).all():
+        return base_mask.copy()
+    y_hat_fit = _model(xf, a, b, c, d)
+    sigma = float(np.std(yf - y_hat_fit))
+    if sigma <= 0.0:
+        return base_mask.copy()
+
+    x_all = max_ch0
+    valid = x_all > b + 1e-9
+    y_pred = np.empty(n, dtype=np.float64)
+    y_pred[:] = np.nan
+    y_pred[valid] = _model(x_all[valid], a, b, c, d)
+    resid = tmax_ch0 - y_pred
+    in_band = np.zeros(n, dtype=bool)
+    in_band[valid] = np.abs(resid[valid]) <= n_sigma * sigma
+    return in_band
+
+def cut_ch1max_tmax(
+    base_mask: np.ndarray,
+    max_ch1: np.ndarray,
+    tmax_ch1: np.ndarray,
+    fit_x_min: float = 1350.0,
+    fit_y_min: float = 11000.0,
+    fit_y_max: float = 17500.0,
+    n_sigma: float = 1.0,
+    min_fit_events: int = 10,) -> np.ndarray:
+    """
+    CH1 max vs tmax(CH1) 相关带 cut（与 maxch1-tmax 相同模型与拟合窗口）：
+    在 base_mask 为 True 且 x∈(fit_x_min,∞)、y∈(fit_y_min, fit_y_max) 的子集上拟合
+    y = a·ln(x−b) + c·x + d/x；σ 为拟合残差标准差；
+    保留 |tmax_ch1 − ŷ(max_ch1)| <= n_sigma * σ 的事件（默认 1σ，与图中红色带一致）。
+    若拟合样本不足、curve_fit 失败或 σ=0，则返回与 base_mask 相同的掩码（不额外剔除）。
+    对 max_ch1 <= b 无法定义 ŷ 的位置，视为不通过本 cut（False）。
+    输入: base_mask, max_ch1, tmax_ch1
+    输出: bool 掩码
+    """
+    def _model(
+        x: np.ndarray, a: float, b: float, c: float, d: float
+    ) -> np.ndarray:
+        return a * np.log(x - b) + c * x + d / x
+
+    n = max_ch1.shape[0]
+    assert tmax_ch1.shape[0] == n and base_mask.shape[0] == n
+
+    max_ch1 = np.asarray(max_ch1, dtype=np.float64)
+    tmax_ch1 = np.asarray(tmax_ch1, dtype=np.float64)
+
+    fit_mask = (
+        base_mask
+        & (max_ch1 > fit_x_min)
+        & (tmax_ch1 > fit_y_min)
+        & (tmax_ch1 < fit_y_max)
+    )
+    xf = max_ch1[fit_mask]
+    yf = tmax_ch1[fit_mask]
+    if xf.size < max(4, min_fit_events):
+        return base_mask.copy()
+
+    xmin = float(np.min(xf))
+    b_hi = xmin - 1e-9
+    A0 = np.column_stack([np.log(xf), xf, 1.0 / xf])
+    coef0, _, rank0, _ = np.linalg.lstsq(A0, yf, rcond=None)
+    if rank0 < 3:
+        return base_mask.copy()
+    a0, c0, d0 = float(coef0[0]), float(coef0[1]), float(coef0[2])
+    b0 = min(xmin * 0.5, xmin - 200.0)
+    p0 = np.array([a0, b0, c0, d0], dtype=np.float64)
+    bounds = (
+        [-np.inf, -np.inf, -np.inf, -np.inf],
+        [np.inf, b_hi, np.inf, np.inf],
+    )
+    try:
+        popt, _ = curve_fit(
+            _model,
+            xf,
+            yf,
+            p0=p0,
+            bounds=bounds,
+            maxfev=100000,
+        )
+    except (ValueError, RuntimeError):
+        return base_mask.copy()
+    a, b, c, d = float(popt[0]), float(popt[1]), float(popt[2]), float(popt[3])
+    if not np.isfinite([a, b, c, d]).all():
+        return base_mask.copy()
+    y_hat_fit = _model(xf, a, b, c, d)
+    sigma = float(np.std(yf - y_hat_fit))
+    if sigma <= 0.0:
+        return base_mask.copy()
+
+    x_all = max_ch1
+    valid = x_all > b + 1e-9
+    y_pred = np.empty(n, dtype=np.float64)
+    y_pred[:] = np.nan
+    y_pred[valid] = _model(x_all[valid], a, b, c, d)
+    resid = tmax_ch1 - y_pred
+    in_band = np.zeros(n, dtype=bool)
+    in_band[valid] = np.abs(resid[valid]) <= n_sigma * sigma
+    return in_band
 
 
 
@@ -802,10 +983,10 @@ def main() -> None:
     total_runs = len(base_names)
     print(f"在 CH0_parameters 中找到 {total_runs} 个 run，将汇总 CH0–CH5 参数后统一做 UMAP+HDBSCAN。")
 
-    # 汇总所有 run 的特征矩阵和事件来源 (base_name, local_event_idx)
-    all_feature_blocks: List[np.ndarray] = []
+    # 先收集每个 run，再构建“全局特征并集”后统一对齐
+    run_params_list: List[RunParameters] = []
     all_sources: List[Tuple[str, int]] = []
-    feature_names_ref: List[str] | None = None
+    feature_name_union_set: set[str] = set()
 
     for idx, base_name in enumerate(base_names, 1):
         try:
@@ -815,22 +996,30 @@ def main() -> None:
             print(f"[错误] 处理 {base_name} 时失败: {e}")
             continue
 
-        if feature_names_ref is None:
-            feature_names_ref = run_params.feature_names
-        else:
-            if run_params.feature_names != feature_names_ref:
-                print(f"[警告] {base_name} 的特征名顺序与之前 run 不一致，跳过该 run。")
-                continue
-
-        all_feature_blocks.append(run_params.feature_matrix)
+        run_params_list.append(run_params)
+        feature_name_union_set.update(run_params.feature_names)
         for ev_idx in range(run_params.n_events):
             all_sources.append((base_name, ev_idx))
 
-    if not all_feature_blocks:
+    if not run_params_list:
         print("[错误] 未能从任何 run 中收集到参数，终止。")
         return
 
+    # 使用字典序确保维度顺序可复现（也便于跨次比对）
+    feature_names_ref = sorted(feature_name_union_set)
+    print(f"全局特征并集维度数: {len(feature_names_ref)}")
+
+    all_feature_blocks: List[np.ndarray] = []
+    for rp in run_params_list:
+        all_feature_blocks.append(_align_run_to_feature_union(rp, feature_names_ref))
+
     X = np.vstack(all_feature_blocks)
+    if np.isnan(X).any():
+        # 并集模式下，不同 run 的缺失维度用列中位数补齐（全 NaN 列回退为 0）
+        col_med = np.nanmedian(X, axis=0)
+        col_med = np.where(np.isfinite(col_med), col_med, 0.0)
+        nan_rows, nan_cols = np.where(np.isnan(X))
+        X[nan_rows, nan_cols] = col_med[nan_cols]
     n_total_events, n_features = X.shape
     print(f"\n合并后总事件数: {n_total_events}，特征维度: {n_features}")
 
@@ -839,6 +1028,9 @@ def main() -> None:
 
     try:
         idx_ch0_max = feature_names_ref.index("ch0_max_ch0")
+        idx_ch0_tmax = feature_names_ref.index("ch0_tmax_ch0")
+        idx_ch1_max = feature_names_ref.index("ch1_max_ch1")
+        idx_ch1_tmax = feature_names_ref.index("ch1_tmax_ch1")
         idx_ch5_max = feature_names_ref.index("ch5_max_ch5")
         idx_ch0_min = feature_names_ref.index("ch0_ch0_min")
         idx_ch4_max = feature_names_ref.index("ch4_max_ch4")
@@ -850,20 +1042,28 @@ def main() -> None:
         ) from e
 
     ch0_max_all = X[:, idx_ch0_max]
+    tmax_ch0_all = X[:, idx_ch0_tmax]
+    max_ch1_all = X[:, idx_ch1_max]
+    tmax_ch1_all = X[:, idx_ch1_tmax]
     ch5_max_all = X[:, idx_ch5_max]
     ch0_min_all = X[:, idx_ch0_min]
     max_ch4_all = X[:, idx_ch4_max]
     tmax_ch4_all = X[:, idx_ch4_tmax]
 
-    # 分别应用三个基础 cut
+    # 分别应用基础 cut
     m_ch0_min = cut_ch0_min_positive(ch0_min_all)
     m_ch0_max = cut_ch0_max_saturation(ch0_max_all)
     m_ch5_rt = cut_ch5_self_trigger(ch5_max_all)
-    m_act = cut_act(max_ch4_all, tmax_ch4_all)
-    mask_physical = m_ch0_min & m_ch0_max & m_ch5_rt & m_act
+    m_acv = cut_acv(max_ch4_all, tmax_ch4_all)
+    # 先得到基础 mask，再在此基础上做 ch0/ch1 的 max-tmax 相关带 cut
+    base_mask = m_ch0_min & m_ch0_max & m_ch5_rt & m_acv
+    m_ch0max_tmax = cut_ch0max_tmax(base_mask, ch0_max_all, tmax_ch0_all)
+    m_ch1max_tmax = cut_ch1max_tmax(base_mask, max_ch1_all, tmax_ch1_all)
+    #mask_physical = base_mask & m_ch0max_tmax & m_ch1max_tmax
+    mask_physical = base_mask
 
     n_kept = int(mask_physical.sum())
-    print(f"根据 CH0/CH5 条件筛选后剩余事件数: {n_kept} / {n_total_events}")
+    print(f"根据物理 cuts（含 CH0/CH1 max-tmax 相关带）筛选后剩余事件数: {n_kept} / {n_total_events}")
     if n_kept == 0:
         print("[错误] 所有事件均被 CH0/CH5 条件滤除，终止 UMAP+HDBSCAN。")
         return

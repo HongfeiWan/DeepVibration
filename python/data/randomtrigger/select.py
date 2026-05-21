@@ -25,6 +25,19 @@ if python_dir not in sys.path:
 
 from utils.visualize import get_h5_files  # noqa: E402
 
+# 与 python/data/inhibit/select.py 保持一致的绘图风格
+_RT_FIGSIZE_INCH = (7.0, 4.5)
+_RT_FS_AXIS_LABEL = 20
+_RT_FS_TICK = 16
+_RT_FS_LEGEND = 16
+
+
+def _apply_plotstyle_rc() -> None:
+    plt.rcParams.update({
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial"],
+    })
+
 
 def select_rt_events(
     h5_file: Optional[str] = None,
@@ -179,36 +192,18 @@ def select_and_plot_one_rt_event(
         min_val = float(np.min(waveform))
         mean_val = float(np.mean(waveform))
 
-        plt.figure(figsize=(10, 6))
+        _apply_plotstyle_rc()
+        plt.figure(figsize=_RT_FIGSIZE_INCH)
         # 主波形：蓝色实线
-        plt.plot(time_axis_us, waveform, "b-", linewidth=0.8, alpha=0.8, label="CH5 Waveform")
+        plt.plot(time_axis_us, waveform, "b-", linewidth=2.0, alpha=0.8, label="CH5 Waveform")
 
-        # 标注最大值位置（RT 事件关注的是大幅度脉冲）
-        max_idx = int(np.argmax(waveform))
-        plt.plot(
-            time_axis_us[max_idx],
-            waveform[max_idx],
-            "ro",
-            markersize=6,
-            label=f"Max: {max_val:.1f}",
-        )
 
-        plt.xlabel("Time (μs)", fontsize=12)
-        plt.ylabel("Amplitude (ADC counts)", fontsize=12)
+        plt.xlabel("Time (μs)", fontsize=_RT_FS_AXIS_LABEL)
+        plt.ylabel("Amplitude (ADC counts)", fontsize=_RT_FS_AXIS_LABEL)
+        plt.tick_params(axis="both", which="major", labelsize=_RT_FS_TICK)
+        plt.xlim(0, 120)
 
-        title_lines = [
-            f"RT Event Waveform on CH5 (event #{event_idx})",
-            f"Max: {max_val:.1f}, Min: {min_val:.1f}, Mean: {mean_val:.1f}, Cut: {cut:.1f}",
-        ]
-        if event_time is not None:
-            title_lines.append(f"Event Time: {event_time:.6f} s")
-
-        plt.title("\n".join(title_lines), fontsize=11)
-
-        # 与 Inhibit 绘图一致：网格、0 线、图例
-        plt.grid(True, alpha=0.3)
-        plt.axhline(y=0, color="r", linestyle="--", linewidth=1, alpha=0.5)
-        plt.legend(fontsize=9)
+        #plt.legend(fontsize=_RT_FS_LEGEND)
         plt.tight_layout()
         plt.show()
 
@@ -219,7 +214,7 @@ def plot_ch0_for_rt_events(
     ch0_idx: int = 0,
     cut: float = 6000.0,
     prefer_max_peak: bool = True,
-    figsize: Tuple[int, int] = (10, 6),
+    figsize: Tuple[float, float] = _RT_FIGSIZE_INCH,
 ) -> None:
     """
     绘制「符合 RT 筛选条件」的事件在 CH0 上的波形（默认只绘制一个事件）。
@@ -310,34 +305,18 @@ def plot_ch0_for_rt_events(
         rt_peak = float(max_values[event_idx])
 
         # 绘制单个波形图
+        _apply_plotstyle_rc()
         plt.figure(figsize=figsize)
         # 主波形：蓝色实线
-        plt.plot(time_axis_us, waveform, "b-", linewidth=0.8, alpha=0.8, label="CH0 Waveform")
+        plt.plot(time_axis_us, waveform, "b-", linewidth=2.0, alpha=0.8, label="CH0 Waveform")
 
-        # 标注最大值位置
-        max_idx = int(np.argmax(waveform))
-        plt.plot(
-            time_axis_us[max_idx],
-            waveform[max_idx],
-            "ro",
-            markersize=6,
-            label=f"Max: {w_max:.1f}",
-        )
 
-        plt.xlabel("Time (μs)", fontsize=12)
-        plt.ylabel("Amplitude (ADC counts)", fontsize=12)
+        plt.xlabel("Time (μs)", fontsize=_RT_FS_AXIS_LABEL)
+        plt.ylabel("Amplitude (ADC counts)", fontsize=_RT_FS_AXIS_LABEL)
+        plt.tick_params(axis="both", which="major", labelsize=_RT_FS_TICK)
+        plt.xlim(0, 120)
 
-        title_lines = [
-            f"RT Event Waveform on CH0 (event #{event_idx})",
-            f"CH0: Min: {w_min:.1f}, Max: {w_max:.1f}, Mean: {w_mean:.1f} | RT peak@CH5: {rt_peak:.1f}, Cut: {cut:.1f}",
-        ]
-
-        plt.title("\n".join(title_lines), fontsize=11)
-
-        # 与 Inhibit 绘图一致：网格、0 线、图例
-        plt.grid(True, alpha=0.3)
-        plt.axhline(y=0, color="r", linestyle="--", linewidth=1, alpha=0.5)
-        plt.legend(fontsize=9)
+        #plt.legend(fontsize=_RT_FS_LEGEND)
         plt.tight_layout()
         plt.show()
 

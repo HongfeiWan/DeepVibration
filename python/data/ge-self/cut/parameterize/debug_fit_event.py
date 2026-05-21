@@ -31,6 +31,19 @@ from utils.fit import (  # type: ignore  # noqa: E402
     _smooth_waveform_for_fast_fit,
 )
 
+# 与 parameter(ch0).py 一致的绘图风格
+_FIGSIZE_MAIN = (4.5, 4.5)
+_FS_AXIS_LABEL = 20
+_FS_TICK = 16
+_FS_LEGEND = 16
+
+
+def _apply_plotstyle_rc() -> None:
+    plt.rcParams.update({
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial"],
+    })
+
 
 def _resolve_ch0_3_file(ch0_3_file: Optional[str]) -> str:
     if ch0_3_file is not None:
@@ -150,8 +163,8 @@ def debug_fit_event(
     # 绘图
     print()
     print("--- 5. 绘图 ---")
-    global_min = float(np.min(waveform_smooth))
-    global_max = float(np.max(waveform_smooth))
+    global_min = float(np.min(waveform))
+    global_max = float(np.max(waveform))
     data_range = global_max - global_min
     if data_range > 0:
         margin = data_range * 0.15
@@ -161,26 +174,40 @@ def debug_fit_event(
         margin = max(abs(center) * 0.1, 100.0)
         y_min, y_max = center - margin, center + margin
 
-    plt.rcParams.update({"font.family": "serif", "font.serif": ["Times New Roman"]})
-    fig, ax = plt.subplots(1, 1, figsize=(10, 6))
+    _apply_plotstyle_rc()
+    fig, ax = plt.subplots(1, 1, figsize=_FIGSIZE_MAIN)
 
-    ax.plot(time_axis_us, waveform_smooth, "b-", lw=1, label="Waveform (smoothed)")
-    if fit_curve is not None:
-        ax.plot(time_axis_us, fit_curve, "r--", lw=2, label="tanh fit")
-
-    # Mark fitting range and peak position
-    ax.axvspan(time_axis_us[0], time_axis_us[idx_end], alpha=0.1, color="green", label="Fit range")
-    ax.axvline(t_max, color="gray", ls=":", alpha=0.7, label=f"t_max @ idx={idx_max}")
-
-    ax.set_xlabel("Time (µs)", fontsize=12)
-    ax.set_ylabel("Amplitude (ADC)", fontsize=12)
-    ax.set_ylim(y_min, y_max)
-    ax.grid(True, alpha=0.3)
-    ax.legend()
-    ax.set_title(
-        f"Event #{event_index}  tanh fit debug  " + ("SUCCESS" if fit_curve is not None else "FAIL"),
-        fontsize=12,
+    ax.plot(
+        time_axis_us,
+        waveform,
+        color="C0",
+        linewidth=4,
+        label="Waveform",
     )
+    if fit_curve is not None:
+        ax.plot(
+            time_axis_us,
+            fit_curve,
+            color="red",
+            linestyle="--",
+            linewidth=4.0,
+            alpha=0.8,
+            label="Fit Curve",
+        )
+
+    ax.set_xlabel("Time (µs)", fontsize=_FS_AXIS_LABEL)
+    ax.set_ylabel("Amplitude (ADC)", fontsize=_FS_AXIS_LABEL)
+    ax.tick_params(axis="both", which="major", labelsize=_FS_TICK)
+    #ax.set_ylim(800, 11000)
+    #ax.grid(True, alpha=0.3)
+    # parameter(ch0).py 主图不显示 legend；需要时可取消下行
+    # ax.legend(fontsize=_FS_LEGEND)
+    # ax.set_title(
+    #     f"Event #{event_index}  tanh fit debug  " + ("SUCCESS" if fit_curve is not None else "FAIL"),
+    #     fontsize=12,
+    # )
+    ax.set_xlim(5 , 55)
+    ax.legend(fontsize=_FS_LEGEND)
     fig.tight_layout()
     plt.show()
 
@@ -188,7 +215,7 @@ def debug_fit_event(
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="调试指定 event 的 tanh 拟合")
-    parser.add_argument("-e", "--event", type=int, default=5716, help="event 索引")
+    parser.add_argument("-e", "--event", type=int, default=3, help="event 索引")
     parser.add_argument("-f", "--file", type=str, default=None, help="CH0-3 文件路径")
     parser.add_argument(
         "-c",

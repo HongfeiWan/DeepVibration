@@ -6,13 +6,13 @@ combine_spectrum.py
 功能：
 1) 读取 30 参数 UMAP+HDBSCAN 的事件映射 HDF5，选择指定 cluster 的所有事件；
    同时将对应源文件中的 RT 事件也并入（RT 事件计数也算入谱中）。
-2) 使用 basic+act.py 的切割逻辑（CH0/CH5/CH1/CH4 参数文件 + 一系列 cut），得到通过所有 cuts
+2) 使用 basic+acv.py 的切割逻辑（CH0/CH5/CH1/CH4 参数文件 + 一系列 cut），得到通过所有 cuts
    的事件集合，并计算其能谱。
 3) 将 (1) 与 (2) 两条能谱画在同一个图上，实现“能谱叠加”。
 4) cluster 那条能谱仍然执行基本的 10–11 keV 高斯 + 线性本底拟合；
-   basic+act 那条在图之外额外绘制 CH0max vs CH1max 散点图（与 basic+act.py 保持一致）。
+   basic+acv 那条在图之外额外绘制 CH0max vs CH1max 散点图（与 basic+acv.py 保持一致）。
 
-默认行为尽量与 spectrum.py / basic+act.py 一致：
+默认行为尽量与 spectrum.py / basic+acv.py 一致：
 - 能量换算 E(keV) 使用相同线性系数
 - 能谱归一化使用相同的曝光参数：0.5 kg * 20 day
 """
@@ -66,6 +66,7 @@ def _list_paired_param_files() -> List[Tuple[Path, Path]]:
     """
     基于 CH0_parameters 目录的文件名，寻找同时存在于 CH1_parameters 与 CH4_parameters 与 CH5_parameters 中的参数文件对。
     """
+
     if not CH0_PARAM_DIR.exists():
         raise FileNotFoundError(f"CH0_parameters 目录不存在: {CH0_PARAM_DIR}")
     if not CH1_PARAM_DIR.exists():
@@ -97,14 +98,13 @@ def _list_paired_param_files() -> List[Tuple[Path, Path]]:
 
     return pairs
 
-
 def _load_basic_features_for_run(
     ch0_param_path: Path,
-    ch5_param_path: Path,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ch5_param_path: Path,) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
-    从单个 run 的 CH0/CH5/CH1/CH4 参数文件中读取基准特征（basic+act.py 保持一致）。
+    从单个 run 的 CH0/CH5/CH1/CH4 参数文件中读取基准特征（basic+acv.py 保持一致）。
     """
+
     with h5py.File(ch0_param_path, "r") as f_ch0:
         if "max_ch0" not in f_ch0 or "ch0_min" not in f_ch0 or "ch0ped_mean" not in f_ch0:
             raise KeyError(
@@ -178,18 +178,15 @@ def cut_ch0_min_positive(ch0_min: np.ndarray, threshold: float = 0.0) -> np.ndar
 
     return ch0_min > threshold
 
-
 def cut_ch0_max_saturation(max_ch0: np.ndarray, max_val: float = 16382.0) -> np.ndarray:
     """条件：max_ch0 <= max_val（排除饱和事例）。"""
 
     return max_ch0 <= max_val
 
-
 def cut_ch5_self_trigger(max_ch5: np.ndarray, rt_threshold: float = 6000.0) -> np.ndarray:
     """条件：max_ch5 <= rt_threshold（排除随机触发）。"""
 
     return max_ch5 <= rt_threshold
-
 
 def cut_pedestal_3sigma(
     ch0_ped_mean: np.ndarray,
@@ -197,8 +194,7 @@ def cut_pedestal_3sigma(
     max_ch5: np.ndarray,
     rt_threshold: float = 6000.0,
     n_sigma: float = 3.0,
-    min_rt_events: int = 10,
-) -> np.ndarray:
+    min_rt_events: int = 10,) -> np.ndarray:
     """
     前沿基线 cut：使用随机触发事例 (max_ch5 > rt_threshold) 的 CH0/CH1 pedestal 分别拟合高斯，
     保留 |ch0_ped - μ0| <= n_sigma*σ0 且 |ch1_ped - μ1| <= n_sigma*σ1 的事件。
@@ -224,17 +220,16 @@ def cut_pedestal_3sigma(
 
     return mask
 
-def cut_act(
+def cut_acv(
     max_ch4: np.ndarray,
     tmax_ch4: np.ndarray,
     trigger_threshold: float = 7060.0,
     t_ge_us: float = 40.0,
     sampling_interval_ns: float = 4.0,
     dt_min_us: float = 1.0,
-    dt_max_us: float = 16.0,
-) -> np.ndarray:
+    dt_max_us: float = 16.0,) -> np.ndarray:
     """
-    ACT cut（与 basic+act.py 保持一致）：
+    acv cut（与 basic+acv.py 保持一致）：
     - 对 NaI 过阈事件 (max_ch4 >= trigger_threshold)，选取 Δt 非 [dt_min_us, dt_max_us] μs 的事例；
     - 对 NaI 未过阈事件，一律保留。
     """
@@ -246,9 +241,8 @@ def cut_act(
     nai_ok = max_ch4 >= trigger_threshold
     t_ch4_us = tmax_ch4 * sampling_interval_ns * 1e-3
     delta_t_us = t_ge_us - t_ch4_us
-    act_mask = (delta_t_us < dt_min_us) | (delta_t_us > dt_max_us)
-    return (~nai_ok) | (nai_ok & act_mask)
-
+    acv_mask = (delta_t_us < dt_min_us) | (delta_t_us > dt_max_us)
+    return (~nai_ok) | (nai_ok & acv_mask)
 
 def cut_mincut(
     ch0_min: np.ndarray,
@@ -261,18 +255,17 @@ def cut_mincut(
     t_ge_us: float = 40.0,
     sampling_interval_ns: float = 4.0,
     dt_min_us: float = 1.0,
-    dt_max_us: float = 16.0,
-) -> np.ndarray:
+    dt_max_us: float = 16.0,) -> np.ndarray:
     """
-    mincut：在 ACT 基础上，用 ACT 事例拟合 CH0min/CH1min 分布，
+    mincut：在 acv 基础上，用 acv 事例拟合 CH0min/CH1min 分布，
     保留 CH0min、CH1min 均在中心值 ± n_sigma*σ 内的事件。
     """
 
     n = ch0_min.shape[0]
     mask = np.ones(n, dtype=bool)
-    act_mask = cut_act(max_ch4, tmax_ch4, trigger_threshold, t_ge_us, sampling_interval_ns, dt_min_us, dt_max_us)
+    acv_mask = cut_acv(max_ch4, tmax_ch4, trigger_threshold, t_ge_us, sampling_interval_ns, dt_min_us, dt_max_us)
 
-    fit_mask = act_mask
+    fit_mask = acv_mask
     ch0_min_fit = ch0_min[fit_mask]
     if ch0_min_fit.size >= min_fit_events:
         mu0 = float(ch0_min_fit.mean())
@@ -289,7 +282,6 @@ def cut_mincut(
 
     return mask
 
-
 def cut_pncut(
     base_mask: np.ndarray,
     max_ch0: np.ndarray,
@@ -297,14 +289,13 @@ def cut_pncut(
     fit_ch0_min: float = 3000.0,
     fit_ch0_max: float = 12000.0,
     n_sigma: float = 1.0,
-    min_fit_events: int = 10,
-) -> np.ndarray:
+    min_fit_events: int = 10,) -> np.ndarray:
     """
-    pncut（与 basic+act.py 逻辑一致）：
+    pncut（与 basic+acv.py 逻辑一致）：
     - 先在 base_mask 内，用 CH0max 落在指定区间的点拟合一条直线；
     - 计算所有事件相对直线的残差，并输出 |r| <= n_sigma * σ 的事件。
 
-    注意：basic+act.py 当前并未使用 pn_mask 来更新最终 mask，这里同样只计算不叠加。
+    注意：basic+acv.py 当前并未使用 pn_mask 来更新最终 mask，这里同样只计算不叠加。
     """
 
     n = max_ch0.shape[0]
@@ -330,16 +321,16 @@ def cut_pncut(
     return band_mask
 
 
-def _load_basic_act_pass_events() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _load_basic_acv_pass_events() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    读取 basic+act.py 的全部参数文件，对应 cut 后返回：
+    读取 basic+acv.py 的全部参数文件，对应 cut 后返回：
     - passed_max_ch0: (N,) 通过所有 cuts 的 CH0max
     - passed_max_ch1: (N,) 通过所有 cuts 的 CH1max
     - passed_energy:  (N,) 对应能量（keV）
     """
 
     pairs = _list_paired_param_files()
-    print(f"[basic+act] 找到 {len(pairs)} 个可配对的参数文件。")
+    print(f"[basic+acv] 找到 {len(pairs)} 个可配对的参数文件。")
 
     all_max_ch0: List[np.ndarray] = []
     all_ch0_min: List[np.ndarray] = []
@@ -374,45 +365,44 @@ def _load_basic_act_pass_events() -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     tmax_ch4 = np.concatenate(all_tmax_ch4)
 
     n_raw = max_ch0.shape[0]
-    print(f"[basic+act] 原始事件数: {n_raw}")
+    print(f"[basic+acv] 原始事件数: {n_raw}")
 
     m1 = cut_ch0_min_positive(ch0_min)
     n1 = int(m1.sum())
-    print(f"[basic+act] cut_ch0_min_positive 单独使用后: {n1} / {n_raw}")
+    print(f"[basic+acv] cut_ch0_min_positive 单独使用后: {n1} / {n_raw}")
 
     m2 = cut_ch0_max_saturation(max_ch0)
     n2 = int(m2.sum())
-    print(f"[basic+act] cut_ch0_max_saturation 单独使用后: {n2} / {n_raw}")
+    print(f"[basic+acv] cut_ch0_max_saturation 单独使用后: {n2} / {n_raw}")
 
     m3 = cut_ch5_self_trigger(max_ch5)
     n3 = int(m3.sum())
-    print(f"[basic+act] cut_ch5_self_trigger 单独使用后: {n3} / {n_raw}")
+    print(f"[basic+acv] cut_ch5_self_trigger 单独使用后: {n3} / {n_raw}")
 
     m4 = cut_pedestal_3sigma(ch0_ped_mean, ch1_ped_mean, max_ch5)
     n4 = int(m4.sum())
-    print(f"[basic+act] cut_pedestal_3sigma 单独使用后: {n4} / {n_raw}")
+    print(f"[basic+acv] cut_pedestal_3sigma 单独使用后: {n4} / {n_raw}")
 
-    m5 = cut_act(max_ch4, tmax_ch4)
+    m5 = cut_acv(max_ch4, tmax_ch4)
     n5 = int(m5.sum())
-    print(f"[basic+act] cut_act 单独使用后: {n5} / {n_raw}")
+    print(f"[basic+acv] cut_acv 单独使用后: {n5} / {n_raw}")
 
     m6 = cut_mincut(ch0_min, ch1_min, max_ch5, max_ch4, tmax_ch4)
     n6 = int(m6.sum())
-    print(f"[basic+act] cut_mincut 单独使用后: {n6} / {n_raw}")
+    print(f"[basic+acv] cut_mincut 单独使用后: {n6} / {n_raw}")
 
-    mask = m1 & m2 & m3 & m4 & m5 & m6
-    
+    mask = m1 & m2 & m3 & m4 & ~m5 & m6
+    #mask = m1 & m2 & m3 & m4 & m6
     pn_mask = cut_pncut(mask, max_ch0, max_ch1)
     n_final = int(mask.sum())
     n_pn = int(pn_mask.sum())
-    print(f"[basic+act] 依次使用 cuts 后最终剩余(mask): {n_final} / {n_raw}")
-    print(f"[basic+act] pn_mask 结果（注意：当前与 basic+act.py 一致，未叠加到最终 mask）: {n_pn} / {n_raw}")
+    print(f"[basic+acv] 依次使用 cuts 后最终剩余(mask): {n_final} / {n_raw}")
+    print(f"[basic+acv] pn_mask 结果（注意：当前与 basic+acv.py 一致，未叠加到最终 mask）: {n_pn} / {n_raw}")
 
     passed_max_ch0 = max_ch0[mask]
     passed_max_ch1 = max_ch1[mask]
     passed_energy = ENERGY_A * passed_max_ch0 + ENERGY_B
     return passed_max_ch0, passed_max_ch1, passed_energy
-
 
 def _load_event_mapping(path: Path) -> Tuple[List[str], np.ndarray, np.ndarray, np.ndarray]:
     if not path.exists():
@@ -433,14 +423,12 @@ def _load_event_mapping(path: Path) -> Tuple[List[str], np.ndarray, np.ndarray, 
 
     return file_paths, event_file_indices, event_event_indices, labels
 
-
 def _compute_max_ch0_for_cluster(
     file_paths: Sequence[str],
     event_file_indices: np.ndarray,
     event_event_indices: np.ndarray,
     labels: np.ndarray,
-    target_cluster: int = 0,
-) -> np.ndarray:
+    target_cluster: int = 0,) -> np.ndarray:
     """
     对给定 cluster 中的所有事件，从 CH0max 源文件读取 max(ch0)，并将对应文件在 RTCH0max 中的 RT 事件并入。
     """
@@ -504,7 +492,8 @@ def _compute_max_ch0_for_cluster(
             if ev_arr.size == 0:
                 continue
 
-            union_indices = ev_arr
+            # h5py 花式索引要求索引严格递增；先标准化 cluster 事件索引
+            union_indices = np.unique(ev_arr)
             if rtch0max_path.exists():
                 with h5py.File(rtch0max_path, "r") as f_rt:
                     if "rt_event_indices" in f_rt:
@@ -512,7 +501,7 @@ def _compute_max_ch0_for_cluster(
                         rt_valid = (rt_indices >= 0) & (rt_indices < n_events_in_file)
                         rt_indices_valid = rt_indices[rt_valid]
                         if rt_indices_valid.size > 0:
-                            union_indices = np.unique(np.concatenate([ev_arr, rt_indices_valid]))
+                            union_indices = np.unique(np.concatenate([union_indices, rt_indices_valid]))
 
             max_vals_file = np.asarray(dset[union_indices], dtype=np.float64)
             max_values.extend(max_vals_file.tolist())
@@ -520,7 +509,6 @@ def _compute_max_ch0_for_cluster(
     max_values_arr = np.asarray(max_values, dtype=np.float64)
     print(f"cluster={target_cluster}: 成功计算 max(ch0) 的事件数 = {max_values_arr.size}")
     return max_values_arr
-
 
 def _compute_rates_from_energy(energy_values: np.ndarray, bin_edges: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     if energy_values.size == 0:
@@ -537,9 +525,51 @@ def _compute_rates_from_energy(energy_values: np.ndarray, bin_edges: np.ndarray)
     rates = counts / denom
     return bin_centers, bin_widths, rates
 
-
 def _default_hdf5_path_relative_to_project_root() -> Path:
     return PROJECT_ROOT / "data" / "hdf5" / "ge_30param_umap_hdbscan_eventmap.h5"
+
+def plot_efficiency_vs_energy(
+    bin_centers: np.ndarray,
+    bin_widths: np.ndarray,
+    rates_cluster: np.ndarray,
+    rates_basic: np.ndarray,
+    cluster: int,
+    e_min_kev: float = 0.0,
+    e_max_kev: float = 0.6,
+) -> None:
+    """
+    绘制效率图：每个 bin 的 cluster 计数率 / basic+acv 计数率。
+    另起一个 figure，横轴能量 (keV)，纵轴效率；仅显示 [e_min_kev, e_max_kev] 范围内的效率。
+    """
+    mask_range = (bin_centers >= e_min_kev) & (bin_centers <= e_max_kev)
+    mask_valid = mask_range & (rates_basic > 0)
+    if not np.any(mask_valid):
+        print(f"[效率图] [{e_min_kev}, {e_max_kev}] keV 范围内无有效 bin（basic 计数率需 > 0），跳过。")
+        return
+
+    x_eff = bin_centers[mask_valid]
+    rc = rates_cluster[mask_valid]
+    rb = rates_basic[mask_valid]
+    bw = bin_widths[mask_valid]
+    eff = rc / rb
+
+    # Poisson 误差传播: σ(eff)/eff = sqrt(1/counts_c + 1/counts_b)
+    denom = EXPOSURE_KG * bw * EXPOSURE_DAYS
+    counts_c = np.maximum(rc * denom, 0.5)  # 避免 1/0
+    counts_b = np.maximum(rb * denom, 0.5)
+    eff_err = eff * np.sqrt(1.0 / counts_c + 1.0 / counts_b)
+
+    plt.rcParams.update({"font.family": "serif", "font.serif": ["Times New Roman"]})
+    fig, ax = plt.subplots(1, 1, figsize=(8, 5))
+    ax.errorbar(x_eff, eff, yerr=eff_err, fmt="o", color="C0", markersize=4, capsize=2, capthick=1, label=f"cluster={cluster} / basic+acv")
+    ax.set_xlim(e_min_kev, e_max_kev)
+    ax.set_xlabel("Energy (keV)", fontsize=12)
+    ax.set_ylabel("Efficiency (cluster rate / basic+acv rate)", fontsize=12)
+    ax.set_title(f"Efficiency in [{e_min_kev}, {e_max_kev}] keV", fontsize=13)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    plt.show()
 
 
 def _plot_cluster_overlay_with_fit(
@@ -548,8 +578,7 @@ def _plot_cluster_overlay_with_fit(
     bin_widths: np.ndarray,
     rates_cluster: np.ndarray,
     rates_basic: np.ndarray,
-    cluster: int,
-) -> None:
+    cluster: int,) -> None:
     plt.rcParams.update({"font.family": "serif", "font.serif": ["Times New Roman"]})
 
     fig, ax = plt.subplots(1, 1, figsize=(8, 6))
@@ -569,15 +598,15 @@ def _plot_cluster_overlay_with_fit(
         color="C1",
         alpha=0.6,
         align="center",
-        label="basic+act cuts (all cuts)",
+        label="basic+acv cuts",
     )
     ax.set_yscale("log")
     ax.set_xlabel("Energy (keV)", fontsize=12)
     ax.set_ylabel(r"Rate [counts / (keV·kg·day)]", fontsize=12)
-    # 尽量保持与 spectrum.py 的标题一致；仅通过 legend 区分叠加数据
-    ax.set_title(f"Energy spectrum for cluster={cluster}", fontsize=13)
+    ax.set_title("Energy spectrum overlay", fontsize=13)
     ax.grid(True, alpha=0.3)
     ax.legend()
+    ax.set_xlim(0, 2)
     fig.tight_layout()
 
     # ----------------------------
@@ -635,10 +664,9 @@ def _plot_cluster_overlay_with_fit(
 
     plt.show()
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="把 basic+act.py 的能谱叠加到 spectrum.py 的能谱图上。"
+        description="把 basic+acv.py 的能谱叠加到 spectrum.py 的能谱图上。"
     )
     parser.add_argument(
         "hdf5_path",
@@ -648,7 +676,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cluster",
         type=int,
-        default=5,
+        default=0,
         help="要分析的 cluster label（默认 5，与 spectrum.py 保持一致）。",
     )
     parser.add_argument(
@@ -657,8 +685,13 @@ def parse_args() -> argparse.Namespace:
         default=500,
         help="能谱直方图 bin 数（默认 500）。",
     )
+    parser.add_argument(
+        "--bins-efficiency",
+        type=int,
+        default=120,
+        help="效率图在 [0, 0.6] keV 范围内的 bin 数（默认 120，约 5 eV/bin）。",
+    )
     return parser.parse_args()
-
 
 def main() -> None:
     args = parse_args()
@@ -685,18 +718,15 @@ def main() -> None:
     )
     energy_cluster = ENERGY_A * max_values_cluster + ENERGY_B
 
-    # basic+act spectrum (from basic+act.py)
-    passed_max_ch0, passed_max_ch1, energy_basic = _load_basic_act_pass_events()
+    # basic+acv spectrum (from basic+acv.py)
+    passed_max_ch0, passed_max_ch1, energy_basic = _load_basic_acv_pass_events()
 
     # Use common bin edges so the overlay is aligned.
-    # 为了让 cluster 那条谱与 spectrum.py 完全一致：bin_edges 只由 cluster 决定；
-    # basic+act 复用同一组 bin_edges 做计数，从而“叠加到 spectrum.py 的能谱图坐标轴上”。
-    if energy_cluster.size > 0:
-        bin_edges = np.histogram_bin_edges(energy_cluster, bins=args.bins)
-    elif energy_basic.size > 0:
-        bin_edges = np.histogram_bin_edges(energy_basic, bins=args.bins)
-    else:
-        raise RuntimeError("cluster 与 basic+act 都没有可用事件，无法绘图。")
+    energy_all = np.concatenate([energy_cluster, energy_basic]) if energy_basic.size > 0 else energy_cluster
+    if energy_all.size == 0:
+        raise RuntimeError("energy_all 为空，无法绘图（cluster 与 basic+acv 都没有事件通过/可用）。")
+
+    bin_edges = np.histogram_bin_edges(energy_all, bins=args.bins)
 
     bin_centers, bin_widths, rates_cluster = _compute_rates_from_energy(energy_cluster, bin_edges)
     _, _, rates_basic = _compute_rates_from_energy(energy_basic, bin_edges)
@@ -710,13 +740,30 @@ def main() -> None:
         cluster=args.cluster,
     )
 
-    # basic+act scatter plot (same as basic+act.py)
+    # 效率图使用更细的 bin（0–0.6 keV 范围）
+    e_min_eff, e_max_eff = 0.0, 2.0
+    bin_edges_eff = np.linspace(e_min_eff, e_max_eff, args.bins_efficiency + 1)
+    ec_in = energy_cluster[(energy_cluster >= e_min_eff) & (energy_cluster <= e_max_eff)]
+    eb_in = energy_basic[(energy_basic >= e_min_eff) & (energy_basic <= e_max_eff)]
+    bc_eff, bw_eff, rc_eff = _compute_rates_from_energy(ec_in, bin_edges_eff)
+    _, _, rb_eff = _compute_rates_from_energy(eb_in, bin_edges_eff)
+    plot_efficiency_vs_energy(
+        bin_centers=bc_eff,
+        bin_widths=bw_eff,
+        rates_cluster=rc_eff,
+        rates_basic=rb_eff,
+        cluster=args.cluster,
+        e_min_kev=e_min_eff,
+        e_max_kev=e_max_eff,
+    )
+
+    # basic+acv scatter plot (same as basic+acv.py)
     if passed_max_ch0.size > 0:
         plt.figure(figsize=(8, 6))
         plt.scatter(passed_max_ch0, passed_max_ch1, s=2, alpha=0.5, edgecolors="none")
         plt.xlabel("CH0 maximum amplitude (FADC)")
         plt.ylabel("CH1 maximum amplitude (FADC)")
-        plt.title(f"CH0max vs CH1max (basic+act cuts, N={passed_max_ch0.size})")
+        plt.title(f"CH0max vs CH1max (basic+acv cuts, N={passed_max_ch0.size})")
         plt.tight_layout()
         plt.show()
 

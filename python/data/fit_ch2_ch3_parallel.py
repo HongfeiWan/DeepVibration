@@ -507,6 +507,340 @@ def _backfill_n_fit_points_for_param_dir(param_dir: str, channel_idx: int) -> No
                 print(f"[补写 n_fit_points] 写入完成: {param_path}")
 
 
+def _compute_waveform_extrema_and_times(waveform: np.ndarray) -> tuple[np.float32, np.float32, np.int32, np.int32]:
+    """
+    对单个事件波形计算：
+        - max: 最大值
+        - min: 最小值
+        - tmax: 最大值对应采样点索引
+        - tmin: 最小值对应采样点索引
+    """
+    wf = np.asarray(waveform, dtype=np.float32)
+    if wf.size == 0:
+        return (np.float32(0.0), np.float32(0.0), np.int32(0), np.int32(0))
+    idx_max = int(np.argmax(wf))
+    idx_min = int(np.argmin(wf))
+    return (
+        np.float32(wf[idx_max]),
+        np.float32(wf[idx_min]),
+        np.int32(idx_max),
+        np.int32(idx_min),
+    )
+
+def _process_one_param_file_extrema(
+    param_path: str,
+    channel_idx: int,
+    max_key: str,
+    min_key: str,
+    tmax_key: str,
+    tmin_key: str,) -> str:
+    required_keys = (max_key, min_key, tmax_key, tmin_key)
+    try:
+        with h5py.File(param_path, "r") as f_param:
+            missing_keys = [k for k in required_keys if k not in f_param]
+            if not missing_keys:
+                return f"[补写 max/min/tmax/tmin] 已完整，跳过: {os.path.basename(param_path)}"
+
+            source_file = f_param.attrs.get("source_file", None)
+            ch_idx_attr = f_param.attrs.get("channel_index", None)
+            if source_file is None or ch_idx_attr is None:
+                return f"[补写 max/min/tmax/tmin] 文件缺少 source_file/channel_index 属性，跳过: {param_path}"
+            ch_idx_attr = int(ch_idx_attr)
+            if ch_idx_attr != channel_idx:
+                return (
+                    f"[补写 max/min/tmax/tmin] 文件 {param_path} 中 channel_index={ch_idx_attr} "
+                    f"与期望通道 {channel_idx} 不一致，跳过。"
+                )
+            try:
+                source_file_str = source_file.decode("utf-8") if isinstance(source_file, bytes) else str(source_file)
+            except Exception:
+                source_file_str = str(source_file)
+
+            if "tanh_p0" not in f_param:
+                return f"[补写 max/min/tmax/tmin] 参数文件 {param_path} 中缺少 tanh_p0 数据集，跳过。"
+            n_param_events = int(f_param["tanh_p0"].shape[0])
+
+        if not os.path.exists(source_file_str):
+            return f"[补写 max/min/tmax/tmin] 找不到源 CH0-3 文件，跳过: {source_file_str}"
+
+        with h5py.File(source_file_str, "r") as f_ch:
+            ch_data = f_ch["channel_data"]
+            if ch_data.ndim != 3:
+                return f"[补写 max/min/tmax/tmin] 源文件 {source_file_str} 的 channel_data 维度异常: {ch_data.shape}"
+
+            # 兼容两种常见存储布局：
+            # 1) (time_samples, num_channels, num_events)
+            # 2) (num_events,  num_channels, time_samples)
+            d0, d1, d2 = ch_data.shape
+            if channel_idx >= d1:
+                return (
+                    f"[补写 max/min/tmax/tmin] 源文件 {source_file_str} 通道数不足，"
+                    f"channel_idx={channel_idx}, num_channels={d1}，跳过。"
+                )
+
+            # 关键修正：
+            # preprocessor.py 生成的 CH0-3 原始数据通常是 (time, ch, event)，且 time_samples(=30000) 往往大于 num_events(=10000)。
+            # 原逻辑使用 `if d2 >= d0` 判定 (time, ch, event)，在本项目常见情况下会误判并把 time 当成 event，导致 min/max 被算错（常出现大量 0）。
+            is_time_ch_event = d0 >= d2
+            if is_time_ch_event:
+                # (time, ch, event)
+                n_events = min(int(d2), n_param_events)
+                if n_events == 0:
+                    return f"[补写 max/min/tmax/tmin] 文件 {param_path} 无事件可处理，跳过。"
+                wf = np.asarray(ch_data[:, channel_idx, :n_events], dtype=np.float32)
+            else:
+                # (event, ch, time)
+                n_events = min(int(d0), n_param_events)
+                if n_events == 0:
+                    return f"[补写 max/min/tmax/tmin] 文件 {param_path} 无事件可处理，跳过。"
+                wf = np.asarray(ch_data[:n_events, channel_idx, :], dtype=np.float32)
+
+        # extrema 计算：统一使用 NumPy 向量化（正常启动：仅补写缺失字段，不覆盖已有字段）
+        if is_time_ch_event:
+            max_arr = np.max(wf, axis=0).astype(np.float32, copy=False)
+            min_arr = np.min(wf, axis=0).astype(np.float32, copy=False)
+            tmax_arr = np.argmax(wf, axis=0).astype(np.int32, copy=False)
+            tmin_arr = np.argmin(wf, axis=0).astype(np.int32, copy=False)
+        else:
+            max_arr = np.max(wf, axis=1).astype(np.float32, copy=False)
+            min_arr = np.min(wf, axis=1).astype(np.float32, copy=False)
+            tmax_arr = np.argmax(wf, axis=1).astype(np.int32, copy=False)
+            tmin_arr = np.argmin(wf, axis=1).astype(np.int32, copy=False)
+
+
+        if n_param_events > n_events:
+            pad_f = np.zeros(n_param_events - n_events, dtype=np.float32)
+            pad_i = np.zeros(n_param_events - n_events, dtype=np.int32)
+            max_to_write = np.concatenate([max_arr, pad_f])
+            min_to_write = np.concatenate([min_arr, pad_f])
+            tmax_to_write = np.concatenate([tmax_arr, pad_i])
+            tmin_to_write = np.concatenate([tmin_arr, pad_i])
+        else:
+            max_to_write = max_arr
+            min_to_write = min_arr
+            tmax_to_write = tmax_arr
+            tmin_to_write = tmin_arr
+
+        with h5py.File(param_path, "a") as f_param:
+            for k, data in (
+                (max_key, max_to_write),
+                (min_key, min_to_write),
+                (tmax_key, tmax_to_write),
+                (tmin_key, tmin_to_write),
+            ):
+                if k in f_param:
+                    continue
+                f_param.create_dataset(k, data=data)
+
+        return (
+            f"[补写 max/min/tmax/tmin] 写入完成: {param_path} "
+            f"(缺失补写: {', '.join(missing_keys) if missing_keys else '无'})"
+        )
+    except Exception as e:
+        return f"[补写 max/min/tmax/tmin] 处理失败: {param_path}, 错误: {e}"
+
+
+def _process_one_param_file_ped_pedt(
+    param_path: str,
+    channel_idx: int,
+    ped_mean_key: str,
+    pedt_mean_key: str,
+    ped_samples: int = 500,) -> str:
+    required_keys = (ped_mean_key, pedt_mean_key)
+    try:
+        with h5py.File(param_path, "r") as f_param:
+            missing_keys = [k for k in required_keys if k not in f_param]
+            if not missing_keys:
+                return f"[补写 ped/pedt] 已完整，跳过: {os.path.basename(param_path)}"
+
+            source_file = f_param.attrs.get("source_file", None)
+            ch_idx_attr = f_param.attrs.get("channel_index", None)
+            if source_file is None or ch_idx_attr is None:
+                return f"[补写 ped/pedt] 文件缺少 source_file/channel_index 属性，跳过: {param_path}"
+            ch_idx_attr = int(ch_idx_attr)
+            if ch_idx_attr != channel_idx:
+                return (
+                    f"[补写 ped/pedt] 文件 {param_path} 中 channel_index={ch_idx_attr} "
+                    f"与期望通道 {channel_idx} 不一致，跳过。"
+                )
+            try:
+                source_file_str = source_file.decode("utf-8") if isinstance(source_file, bytes) else str(source_file)
+            except Exception:
+                source_file_str = str(source_file)
+
+            if "tanh_p0" not in f_param:
+                return f"[补写 ped/pedt] 参数文件 {param_path} 中缺少 tanh_p0 数据集，跳过。"
+            n_param_events = int(f_param["tanh_p0"].shape[0])
+
+        if not os.path.exists(source_file_str):
+            return f"[补写 ped/pedt] 找不到源 CH0-3 文件，跳过: {source_file_str}"
+
+        with h5py.File(source_file_str, "r") as f_ch:
+            ch_data = f_ch["channel_data"]
+            if ch_data.ndim != 3:
+                return f"[补写 ped/pedt] 源文件 {source_file_str} 的 channel_data 维度异常: {ch_data.shape}"
+
+            # 兼容两种常见存储布局：
+            # 1) (time_samples, num_channels, num_events)
+            # 2) (num_events,  num_channels, time_samples)
+            d0, d1, d2 = ch_data.shape
+            if channel_idx >= d1:
+                return (
+                    f"[补写 ped/pedt] 源文件 {source_file_str} 通道数不足，"
+                    f"channel_idx={channel_idx}, num_channels={d1}，跳过。"
+                )
+
+            is_time_ch_event = d0 >= d2
+            if is_time_ch_event:
+                n_events = min(int(d2), n_param_events)
+                if n_events == 0:
+                    return f"[补写 ped/pedt] 文件 {param_path} 无事件可处理，跳过。"
+                wf = np.asarray(ch_data[:, channel_idx, :n_events], dtype=np.float32)  # (time, n_events)
+            else:
+                n_events = min(int(d0), n_param_events)
+                if n_events == 0:
+                    return f"[补写 ped/pedt] 文件 {param_path} 无事件可处理，跳过。"
+                wf_evt_time = np.asarray(ch_data[:n_events, channel_idx, :], dtype=np.float32)  # (n_events, time)
+                wf = wf_evt_time.T  # (time, n_events)
+
+        n_samples = int(wf.shape[0])
+        n_ped = int(min(ped_samples, n_samples))
+        if n_ped <= 0:
+            return f"[补写 ped/pedt] 源文件 {source_file_str} 样本数为 0，跳过: {param_path}"
+
+        front_seg = wf[:n_ped, :]
+        back_seg = wf[-n_ped:, :]
+
+        ped_mean = front_seg.mean(axis=0)
+        pedt_mean = back_seg.mean(axis=0)
+
+        if n_param_events > n_events:
+            pad = np.zeros(n_param_events - n_events, dtype=np.float32)
+            ped_mean_to_write = np.concatenate([np.asarray(ped_mean, dtype=np.float32), pad])
+            pedt_mean_to_write = np.concatenate([np.asarray(pedt_mean, dtype=np.float32), pad])
+        else:
+            ped_mean_to_write = np.asarray(ped_mean, dtype=np.float32)
+            pedt_mean_to_write = np.asarray(pedt_mean, dtype=np.float32)
+
+        with h5py.File(param_path, "a") as f_param:
+            for k, data in (
+                (ped_mean_key, ped_mean_to_write),
+                (pedt_mean_key, pedt_mean_to_write),
+            ):
+                if k in f_param:
+                    continue
+                f_param.create_dataset(k, data=data)
+
+        return (
+            f"[补写 ped/pedt] 写入完成: {param_path} "
+            f"(缺失补写: {', '.join(missing_keys) if missing_keys else '无'})"
+        )
+    except Exception as e:
+        return f"[补写 ped/pedt] 处理失败: {param_path}, 错误: {e}"
+
+def _backfill_extrema_for_param_dir(param_dir: str, channel_idx: int) -> None:
+    """
+    为已有的 CH2/CH3 参数文件补写幅值极值及其时间点（采样点索引）：
+        - CH2: max_ch2, min_ch2, tmax_ch2, tmin_ch2
+        - CH3: max_ch3, min_ch3, tmax_ch3, tmin_ch3
+
+    规则：
+        - 若 4 个数据集都已存在，则跳过该文件；
+        - 否则从 source_file 指向的 CH0-3 源文件读取对应通道波形；
+        - 使用全部 CPU 内核做文件级并行，单文件内使用 NumPy 向量化计算；
+        - 仅补写缺失的数据集，不覆盖已有数据集；
+        - 不做拟合或任何频域计算。
+    """
+    if not os.path.isdir(param_dir):
+        print(f"[补写 max/min/tmax/tmin] 目录不存在，跳过: {param_dir}")
+        return
+
+    files = [
+        os.path.join(param_dir, name)
+        for name in sorted(os.listdir(param_dir))
+        if name.lower().endswith(".h5")
+    ]
+    if not files:
+        print(f"[补写 max/min/tmax/tmin] 目录 {param_dir} 下未找到任何 h5 文件。")
+        return
+
+    max_key = f"max_ch{channel_idx}"
+    min_key = f"min_ch{channel_idx}"
+    tmax_key = f"tmax_ch{channel_idx}"
+    tmin_key = f"tmin_ch{channel_idx}"
+    required_keys = (max_key, min_key, tmax_key, tmin_key)
+
+    print(f"[补写 max/min/tmax/tmin] 在 {param_dir} 中找到 {len(files)} 个参数文件，开始检查。")
+
+    worker_count = min(len(files), (os.cpu_count() or 1))
+    print(f"[补写 max/min/tmax/tmin] 启用文件级并行，worker={worker_count}。")
+
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                _process_one_param_file_extrema,
+                p,
+                channel_idx,
+                max_key,
+                min_key,
+                tmax_key,
+                tmin_key,
+            )
+            for p in files
+        ]
+        for fut in as_completed(futures):
+            print(fut.result())
+
+
+def _backfill_ped_pedt_for_param_dir(param_dir: str, channel_idx: int, ped_samples: int = 500) -> None:
+    """
+    为已有的 CH2/CH3 参数文件补写 pedestal/pedt（按 preprocessor.py 的定义）：
+        - ch{X}ped_mean：前 ped_samples 点（默认 500）的均值
+        - ch{X}pedt_mean：后 ped_samples 点（默认 500）的均值
+
+    规则与 extrema backfill 相同：
+        - 若相关数据集都已存在，则跳过该文件；
+        - 否则从 source_file 指向的 CH0-3 源文件读取对应通道波形；
+        - 使用全部 CPU 内核做文件级并行，单文件内使用 NumPy 向量化计算；
+        - 仅补写缺失的数据集，不覆盖已有数据集。
+    """
+    if not os.path.isdir(param_dir):
+        print(f"[补写 ped/pedt] 目录不存在，跳过: {param_dir}")
+        return
+
+    files = [
+        os.path.join(param_dir, name)
+        for name in sorted(os.listdir(param_dir))
+        if name.lower().endswith(".h5")
+    ]
+    if not files:
+        print(f"[补写 ped/pedt] 目录 {param_dir} 下未找到任何 h5 文件。")
+        return
+
+    ped_mean_key = f"ch{channel_idx}ped_mean"
+    pedt_mean_key = f"ch{channel_idx}pedt_mean"
+
+    print(f"[补写 ped/pedt] 在 {param_dir} 中找到 {len(files)} 个参数文件，开始检查。")
+
+    worker_count = min(len(files), (os.cpu_count() or 1))
+    print(f"[补写 ped/pedt] 启用文件级并行，worker={worker_count}。")
+
+    with ProcessPoolExecutor(max_workers=worker_count) as executor:
+        futures = [
+            executor.submit(
+                _process_one_param_file_ped_pedt,
+                p,
+                channel_idx,
+                ped_mean_key,
+                pedt_mean_key,
+                ped_samples,
+            )
+            for p in files
+        ]
+        for fut in as_completed(futures):
+            print(fut.result())
+
+
 
 def main() -> None:
     """
@@ -551,7 +885,14 @@ def main() -> None:
         _backfill_n_fit_points_for_param_dir(ch2parameters_save_path, channel_idx=2)
         print("开始为 CH3_parameters 补写 n_fit_points（如有缺失）。")
         _backfill_n_fit_points_for_param_dir(ch3parameters_save_path, channel_idx=3)
-
+        print("开始为 CH2_parameters 补写 max/min/tmax/tmin（如有缺失）。")
+        _backfill_extrema_for_param_dir(ch2parameters_save_path, channel_idx=2)
+        print("开始为 CH3_parameters 补写 max/min/tmax/tmin（如有缺失）。")
+        _backfill_extrema_for_param_dir(ch3parameters_save_path, channel_idx=3)
+        print("开始为 CH2_parameters 补写 ped/pedt（如有缺失）。")
+        _backfill_ped_pedt_for_param_dir(ch2parameters_save_path, channel_idx=2, ped_samples=500)
+        print("开始为 CH3_parameters 补写 ped/pedt（如有缺失）。")
+        _backfill_ped_pedt_for_param_dir(ch3parameters_save_path, channel_idx=3, ped_samples=500)
         print("=" * 60)
         print("所有补写 spectral_centroid_mhz 的任务完成。")
         return
@@ -567,7 +908,7 @@ def main() -> None:
         "  1) 批处理 CH0-3 目录下所有 h5：\n"
         "     python fit_ch2_ch3_parallel.py\n"
         "  2) 仅处理指定的某一个 h5：\n"
-        "     python fit_ch2_ch3_parallel.py /path/to/CH0-3/xxx_processed.h5"
+        "     python fit_ch2_ch3_parallel.py /path/to/CH0-3/xxx_processed.h5\n"
     )
     sys.exit(1)
 

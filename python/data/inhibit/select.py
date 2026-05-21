@@ -2,8 +2,11 @@
 # -*- coding: utf-8 -*-
 """
 Inhibit信号分析
-分析CH0-CH3文件中每个事件的CH0信号最小值，判断是否为inhibit信号
-Inhibit信号判断标准：CH0信号的min == 0（最小值严格等于0）
+从 raw_pulse/CH{k}_parameters 中读取每事件最小值（与 preprocessor 写入的 ch{k}_min 一致），
+判断是否为 inhibit 信号。
+Inhibit信号判断标准：对应通道 min == 0（最小值严格等于0）
+
+注：preprocessor 仅对 CH0、CH1 写入 ch0_min / ch1_min；CH2/CH3 无对应参数文件。
 """
 import os
 import sys
@@ -20,14 +23,49 @@ if python_dir not in sys.path:
 
 from utils.visualize import get_h5_files
 
+# 仓库根目录（python/data/inhibit -> .../DeepVibration）
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(current_dir)))
+
+# inhibit 波形图：较小画布 + 较大字号（英寸）
+_INHIBIT_FIGSIZE_INCH = (7.0, 4.5)
+_INHIBIT_FS_AXIS_LABEL = 20
+_INHIBIT_FS_TICK = 16
+_INHIBIT_FS_LEGEND = 16
+
+
+def _parameters_h5_path(pulse_h5_path: str, channel_idx: int) -> str:
+    """与 preprocessor 一致：CH{k}_parameters/<与 CH0-3 文件同名>.h5"""
+    if channel_idx not in (0, 1):
+        raise ValueError(
+            'preprocessor 仅在 CH0_parameters、CH1_parameters 中写入 ch0_min/ch1_min；'
+            '请将 channel_idx 设为 0 或 1。'
+        )
+    subdir = f'CH{channel_idx}_parameters'
+    return os.path.join(
+        _REPO_ROOT, 'data', 'hdf5', 'raw_pulse', subdir, os.path.basename(pulse_h5_path)
+    )
+
+
+def _min_dataset_name(channel_idx: int) -> str:
+    return f'ch{channel_idx}_min'
+
+
+def _apply_plotstyle_rc():
+    """与 python/utils/plotstyle.md 一致的全局字体与默认样式"""
+    plt.rcParams.update({
+        'font.family': 'sans-serif',
+        'font.sans-serif': ['Arial'],
+    })
+
+
 def analyze_inhibit_signals(h5_file: str = None,
                             channel_idx: int = 0) -> Dict:
     """
-    分析文件中CH0信号的inhibit信号
+    分析文件中 CH0（或 CH1）信号的 inhibit 信号；最小值从 CH{k}_parameters 读取。
     
     参数:
         h5_file: HDF5 文件路径，如果为None则自动获取CH0-3目录中的第一个文件
-        channel_idx: 通道索引，默认0表示CH0通道
+        channel_idx: 通道索引，0 或 1（分别对应 ch0_min / ch1_min）
     
     返回:
         包含统计信息的字典
@@ -48,99 +86,86 @@ def analyze_inhibit_signals(h5_file: str = None,
     print(f'文件路径: {h5_file}')
     print('=' * 70)
     
+    params_path = _parameters_h5_path(h5_file, channel_idx)
+    ds_name = _min_dataset_name(channel_idx)
+    if not os.path.exists(params_path):
+        raise FileNotFoundError(
+            f'未找到参数文件（需先经 preprocessor 生成）: {params_path}'
+        )
+
     try:
+        with h5py.File(params_path, 'r') as f_params:
+            if ds_name not in f_params:
+                raise KeyError(f'参数文件中缺少数据集 {ds_name}（预期为 preprocessor 写入的每事件最小值）')
+            min_values = np.asarray(f_params[ds_name][:], dtype=np.float64)
+
+        num_events = min_values.size
+        print(f'\n已从 {os.path.basename(params_path)} 读取 {ds_name}，事件数={num_events}')
+
+        # 与原始脉冲文件核对事件数与通道索引
         with h5py.File(h5_file, 'r') as f:
-            # 检查数据集是否存在
             if 'channel_data' not in f:
-                raise KeyError('文件中没有找到 channel_data 数据集')
-            
+                raise KeyError('脉冲文件中没有找到 channel_data 数据集')
             channel_data = f['channel_data']
-            time_samples, num_channels, num_events = channel_data.shape
-            
-            print(f'\n数据维度: (时间采样点数={time_samples}, 通道数={num_channels}, 事件数={num_events})')
-            
+            time_samples, num_channels, n_ev_pulse = channel_data.shape
+            print(
+                f'脉冲文件维度: (时间采样点数={time_samples}, 通道数={num_channels}, 事件数={n_ev_pulse})'
+            )
             if channel_idx < 0 or channel_idx >= num_channels:
                 raise IndexError(f'通道索引 {channel_idx} 超出范围 [0, {num_channels-1}]')
-            
-            # 提取所有事件的CH0波形最小值
-            print(f'\n正在计算所有事件的CH{channel_idx}信号最小值...')
-            min_values = np.zeros(num_events, dtype=np.float64)
-            
-            # 批量读取以提高效率
-            batch_size = 1000  # 每次处理1000个事件
-            for i in range(0, num_events, batch_size):
-                end_idx = min(i + batch_size, num_events)
-                batch_data = channel_data[:, channel_idx, i:end_idx]  # shape: (time_samples, batch_size)
-                batch_min = np.min(batch_data, axis=0)  # 沿时间轴取最小值
-                min_values[i:end_idx] = batch_min
-                
-                if (i // batch_size + 1) % 10 == 0 or end_idx == num_events:
-                    print(f'  已处理 {end_idx}/{num_events} 个事件 ({end_idx/num_events*100:.1f}%)')
-            
-            # 判断inhibit信号：min == 0（最小值严格等于0）
-            inhibit_mask = min_values == 0
-            inhibit_count = np.sum(inhibit_mask)
-            normal_count = num_events - inhibit_count
-            inhibit_rate = inhibit_count / num_events * 100
-            
-            # 统计接近0但不等于0的情况（用于参考）
-            near_zero_mask = (min_values > -1e-6) & (min_values < 0)  # 接近0但不等于0
-            near_zero_count = np.sum(near_zero_mask)
-            
-            # 打印统计信息
-            print(f'\n' + '=' * 70)
-            print(f'Inhibit信号分析结果:')
-            print(f'=' * 70)
-            print(f'总事件数: {num_events}')
-            print(f'Inhibit信号数量 (CH{channel_idx} min == 0): {inhibit_count}')
-            print(f'正常信号数量 (CH{channel_idx} min != 0): {normal_count}')
-            print(f'Inhibit信号比例: {inhibit_rate:.2f}%')
-            print(f'正常信号比例: {100 - inhibit_rate:.2f}%')
-            if near_zero_count > 0:
-                print(f'\n参考信息: 有 {near_zero_count} 个事件的最小值接近0但不等于0 (范围: (-1e-6, 0))')
-            print(f'\nCH{channel_idx}信号最小值统计:')
-            print(f'  最小值范围: [{np.min(min_values):.2f}, {np.max(min_values):.2f}]')
-            print(f'  平均值: {np.mean(min_values):.2f}')
-            print(f'  中位数: {np.median(min_values):.2f}')
-            
-            # 显示inhibit信号的详细信息
-            if inhibit_count > 0:
-                inhibit_min_values = min_values[inhibit_mask]
-                print(f'\nInhibit信号的最小值统计 (应该全部为0):')
-                print(f'  最小值: {np.min(inhibit_min_values):.10f}')
-                print(f'  最大值: {np.max(inhibit_min_values):.10f}')
-                print(f'  平均值: {np.mean(inhibit_min_values):.10f}')
-                print(f'  中位数: {np.median(inhibit_min_values):.10f}')
-                print(f'  唯一值数量: {len(np.unique(inhibit_min_values))}')
-                if len(np.unique(inhibit_min_values)) > 1:
-                    print(f'  警告: Inhibit信号的最小值不完全为0！唯一值: {np.unique(inhibit_min_values)}')
-                
-                # 找出inhibit事件的索引（前10个）
-                inhibit_indices = np.where(inhibit_mask)[0]
-                print(f'\n前10个Inhibit事件索引: {inhibit_indices[:10].tolist()}')
-            else:
-                print(f'\n未发现Inhibit信号（没有事件的最小值严格等于0）！')
-                # 显示最小值最接近0的事件
-                abs_min_values = np.abs(min_values)
-                closest_to_zero_indices = np.argsort(abs_min_values)[:10]
-                print(f'\n最小值最接近0的前10个事件索引: {closest_to_zero_indices.tolist()}')
-                print(f'对应的最小值: {min_values[closest_to_zero_indices].tolist()}')
-            
-            print('=' * 70)
-            
-            # 返回统计结果
-            stats = {
-                'total_events': num_events,
-                'inhibit_count': int(inhibit_count),
-                'normal_count': int(normal_count),
-                'inhibit_rate': float(inhibit_rate),
-                'normal_rate': float(100 - inhibit_rate),
-                'min_values': min_values,
-                'inhibit_mask': inhibit_mask,
-                'inhibit_indices': np.where(inhibit_mask)[0].tolist() if inhibit_count > 0 else []
-            }
-            
-            return stats
+            if n_ev_pulse != num_events:
+                raise ValueError(
+                    f'事件数不一致: {ds_name} 长度={num_events}，channel_data 第三维={n_ev_pulse}'
+                )
+
+        # 判断inhibit信号：min == 0（最小值严格等于0）
+        inhibit_mask = min_values == 0
+        inhibit_count = np.sum(inhibit_mask)
+        normal_count = num_events - inhibit_count
+        inhibit_rate = inhibit_count / num_events * 100
+
+        # 统计接近0但不等于0的情况（用于参考）
+        near_zero_mask = (min_values > -1e-6) & (min_values < 0)  # 接近0但不等于0
+        near_zero_count = np.sum(near_zero_mask)
+
+        # 打印统计信息
+        print(f'\n' + '=' * 70)
+        print(f'Inhibit信号分析结果:')
+        print(f'=' * 70)
+        print(f'总事件数: {num_events}')
+        print(f'Inhibit信号数量 (CH{channel_idx} min == 0): {inhibit_count}')
+        print(f'正常信号数量 (CH{channel_idx} min != 0): {normal_count}')
+        print(f'Inhibit信号比例: {inhibit_rate:.2f}%')
+        print(f'正常信号比例: {100 - inhibit_rate:.2f}%')
+        if near_zero_count > 0:
+            print(f'\n参考信息: 有 {near_zero_count} 个事件的最小值接近0但不等于0 (范围: (-1e-6, 0))')
+
+        if inhibit_count > 0:
+            inhibit_indices = np.where(inhibit_mask)[0]
+            print(f'\n前10个Inhibit事件索引: {inhibit_indices[:10].tolist()}')
+        else:
+            print(f'\n未发现Inhibit信号（没有事件的最小值严格等于0）！')
+            # 显示最小值最接近0的事件
+            abs_min_values = np.abs(min_values)
+            closest_to_zero_indices = np.argsort(abs_min_values)[:10]
+            print(f'\n最小值最接近0的前10个事件索引: {closest_to_zero_indices.tolist()}')
+            print(f'对应的最小值: {min_values[closest_to_zero_indices].tolist()}')
+
+        print('=' * 70)
+
+        # 返回统计结果
+        stats = {
+            'total_events': num_events,
+            'inhibit_count': int(inhibit_count),
+            'normal_count': int(normal_count),
+            'inhibit_rate': float(inhibit_rate),
+            'normal_rate': float(100 - inhibit_rate),
+            'min_values': min_values,
+            'inhibit_mask': inhibit_mask,
+            'inhibit_indices': np.where(inhibit_mask)[0].tolist() if inhibit_count > 0 else []
+        }
+
+        return stats
     
     except Exception as e:
         print(f'分析过程中出错: {e}')
@@ -148,20 +173,19 @@ def analyze_inhibit_signals(h5_file: str = None,
 
 def plot_inhibit_signals(h5_file: str = None,
                          channel_idx: int = 0,
-                         max_events_to_plot: Optional[int] = 10,
                          save_path: Optional[str] = None,
                          show_plot: bool = True,
-                         figsize: Tuple[int, int] = (16, 10)) -> None:
+                         figsize: Optional[Tuple[float, float]] = None) -> None:
     """
-    可视化inhibit信号对应的CH0波形
+    可视化 inhibit 信号对应通道的波形（最小值标注与 CH{k}_parameters 中一致）。
+    每个 inhibit 事件单独一张图（仅一个子图），按事件顺序依次绘制；保存时多张图自动加 _p001、_p002…
     
     参数:
         h5_file: HDF5 文件路径，如果为None则自动获取CH0-3目录中的第一个文件
-        channel_idx: 通道索引，默认0表示CH0通道
-        max_events_to_plot: 最多绘制的inhibit事件数量，None表示绘制所有
-        save_path: 保存图片路径，如果为None则不保存
-        show_plot: 是否显示图片
-        figsize: 图片大小
+        channel_idx: 通道索引，0 或 1（与 analyze_inhibit_signals 一致）
+        save_path: 保存图片路径，如果为None则不保存；多张图时自动加后缀 _p001、_p002…
+        show_plot: 是否显示图片（多图时逐张弹出）
+        figsize: 单张图尺寸（宽、高，英寸）；默认较小幅面，见 _INHIBIT_FIGSIZE_INCH
     """
     # 如果没有指定文件，自动获取CH0-3目录中的第一个文件
     if h5_file is None:
@@ -188,88 +212,50 @@ def plot_inhibit_signals(h5_file: str = None,
         if inhibit_count == 0:
             print('未发现Inhibit信号，无法绘制')
             return
-        
-        # 确定要绘制的事件数量
-        if max_events_to_plot is None:
-            num_to_plot = inhibit_count
-        else:
-            num_to_plot = min(max_events_to_plot, inhibit_count)
-        
-        selected_indices = inhibit_indices[:num_to_plot]
-        print(f'\n将绘制 {num_to_plot} 个inhibit信号的波形')
-        
-        # 读取文件获取波形数据
+
+        n_figs = inhibit_count
+
+        _apply_plotstyle_rc()
+        if figsize is None:
+            figsize = _INHIBIT_FIGSIZE_INCH
+
         with h5py.File(h5_file, 'r') as f:
             channel_data = f['channel_data']
             time_samples, num_channels, num_events = channel_data.shape
-            
-            # 参数设置
+
             sampling_interval_ns = 4.0  # 4ns per sample
-            sampling_interval_s = sampling_interval_ns * 1e-9
-            time_axis_us = np.arange(time_samples) * sampling_interval_ns / 1000.0  # 转换为微秒
-            
-            # 创建图形
-            n_cols = 3
-            n_rows = (num_to_plot + n_cols - 1) // n_cols
-            fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-            
-            # 如果只有一个subplot，确保axes是数组
-            if num_to_plot == 1:
-                axes = np.array([[axes]])
-            elif n_rows == 1:
-                axes = axes.reshape(1, -1)
-            
-            # 绘制每个inhibit信号的波形
-            for plot_idx, event_idx in enumerate(selected_indices):
-                row = plot_idx // n_cols
-                col = plot_idx % n_cols
-                ax = axes[row, col]
-                
-                # 获取波形数据
+            time_axis_us = np.arange(time_samples) * sampling_interval_ns / 1000.0  # μs
+
+            for fig_idx, event_idx in enumerate(inhibit_indices):
+                fig, ax = plt.subplots(1, 1, figsize=figsize)
+
                 waveform = channel_data[:, channel_idx, event_idx]
-                min_val = np.min(waveform)
-                max_val = np.max(waveform)
-                mean_val = np.mean(waveform)
-                
-                # 绘制波形
-                ax.plot(time_axis_us, waveform, 'b-', linewidth=0.8, alpha=0.8)
-                
-                # 标注最小值（inhibit信号的关键特征）
-                min_idx = np.argmin(waveform)
-                ax.plot(time_axis_us[min_idx], min_val, 'ro', markersize=6, label=f'Min: {min_val:.1f}')
-                
-                # 设置标题和标签
-                ax.set_xlabel('Time (μs)', fontsize=9)
-                ax.set_ylabel('Amplitude (ADC counts)', fontsize=9)
-                ax.set_title(f'Event #{event_idx} (Inhibit Signal)\n'
-                           f'Min: {min_val:.1f}, Max: {max_val:.1f}, Mean: {mean_val:.1f}',
-                           fontsize=10)
-                ax.grid(True, alpha=0.3)
-                ax.legend(fontsize=8)
-                
-                # 添加0线作为参考
-                ax.axhline(y=0, color='r', linestyle='--', linewidth=1, alpha=0.5)
-            
-            # 隐藏多余的subplot
-            for plot_idx in range(num_to_plot, n_rows * n_cols):
-                row = plot_idx // n_cols
-                col = plot_idx % n_cols
-                axes[row, col].axis('off')
-            
-            plt.suptitle(f'Inhibit Signal Waveforms (CH{channel_idx})\n'
-                        f'Total inhibit events: {inhibit_count}, Showing: {num_to_plot}',
-                        fontsize=12, y=0.995)
-            plt.tight_layout()
-            
-            if save_path:
-                plt.savefig(save_path, dpi=150, bbox_inches='tight')
-                print(f'\n图片已保存至: {save_path}')
-            
-            if show_plot:
-                plt.show()
-            else:
-                plt.close()
-        
+
+                ax.plot(time_axis_us, waveform, 'b-', linewidth=2.0, alpha=0.8)
+
+
+                ax.set_xlabel('Time (μs)', fontsize=_INHIBIT_FS_AXIS_LABEL)
+                ax.set_ylabel('Amplitude (ADC counts)', fontsize=_INHIBIT_FS_AXIS_LABEL)
+                ax.tick_params(axis='both', which='major', labelsize=_INHIBIT_FS_TICK)
+
+                ax.set_xlim(0, 120)
+
+                fig.tight_layout()
+
+                if save_path:
+                    if n_figs > 1:
+                        root, ext = os.path.splitext(save_path)
+                        out_path = f'{root}_p{fig_idx + 1:03d}{ext}'
+                    else:
+                        out_path = save_path
+                    fig.savefig(out_path, dpi=150, bbox_inches='tight')
+                    print(f'\n图片已保存至: {out_path}')
+
+                if show_plot:
+                    plt.show()
+                else:
+                    plt.close(fig)
+
         print(f'\n绘制完成！')
     
     except Exception as e:
@@ -297,7 +283,6 @@ if __name__ == '__main__':
         plot_inhibit_signals(
             h5_file=None,  # 自动选择CH0-3目录中的第一个文件
             channel_idx=0,  # CH0通道
-            max_events_to_plot=10,  # 最多绘制10个inhibit信号
             show_plot=True
         )
 

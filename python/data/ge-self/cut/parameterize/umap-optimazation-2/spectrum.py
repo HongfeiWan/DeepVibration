@@ -300,7 +300,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--cluster",
         type=int,
-        default=0,
+        default=5,
         help="要分析的 cluster label（默认 0）。",
     )
     parser.add_argument(
@@ -312,7 +312,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--bins",
         type=int,
-        default=100,
+        default=500,
         help="直方图的 bin 数（默认 100）。",
     )
     return parser.parse_args()

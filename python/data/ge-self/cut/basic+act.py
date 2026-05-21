@@ -22,9 +22,11 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Dict, List, Tuple
+
 import h5py
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+from scipy.optimize import curve_fit
 
 def _discover_project_root() -> Path:
     """
@@ -97,7 +99,18 @@ def _list_paired_param_files() -> List[Tuple[Path, Path]]:
 
 def _load_basic_features_for_run(
     ch0_param_path: Path,
-    ch5_param_path: Path,) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ch5_param_path: Path,) -> Tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,]:
     """
     从单个 run 的 CH0/CH5/CH1/CH4 参数文件中读取基准特征：
         - ch0_max_ch0    ← max_ch0
@@ -109,19 +122,27 @@ def _load_basic_features_for_run(
         - ch1_min        ← ch1_min
         - max_ch4        ← max_ch4
         - tmax_ch4       ← tmax_ch4
+        - tmax_ch0       ← tmax_ch0
+        - tmax_ch1       ← tmax_ch1
 
     返回:
-        max_ch0, ch0_min, max_ch5, ch0_ped_mean, ch1_ped_mean, max_ch1, ch1_min, max_ch4, tmax_ch4
+        max_ch0, ch0_min, max_ch5, ch0_ped_mean, ch1_ped_mean, max_ch1, ch1_min, max_ch4, tmax_ch4, tmax_ch0, tmax_ch1
     """
     with h5py.File(ch0_param_path, "r") as f_ch0:
-        if "max_ch0" not in f_ch0 or "ch0_min" not in f_ch0 or "ch0ped_mean" not in f_ch0:
+        if (
+            "max_ch0" not in f_ch0
+            or "ch0_min" not in f_ch0
+            or "ch0ped_mean" not in f_ch0
+            or "tmax_ch0" not in f_ch0
+        ):
             raise KeyError(
-                f"{ch0_param_path.name} 中缺少 max_ch0 / ch0_min / ch0ped_mean 数据集，"
+                f"{ch0_param_path.name} 中缺少 max_ch0 / ch0_min / ch0ped_mean / tmax_ch0 数据集，"
                 "请确认该文件由当前版本的 preprocessor.py 生成。"
             )
         max_ch0 = np.asarray(f_ch0["max_ch0"][...], dtype=np.float64)
         ch0_min = np.asarray(f_ch0["ch0_min"][...], dtype=np.float64)
         ch0_ped_mean = np.asarray(f_ch0["ch0ped_mean"][...], dtype=np.float64)
+        tmax_ch0 = np.asarray(f_ch0["tmax_ch0"][...], dtype=np.float64)
 
     with h5py.File(ch5_param_path, "r") as f_ch5:
         if "max_ch5" not in f_ch5:
@@ -133,14 +154,20 @@ def _load_basic_features_for_run(
 
     ch1_param_path = CH1_PARAM_DIR / ch0_param_path.name
     with h5py.File(ch1_param_path, "r") as f_ch1:
-        if "ch1ped_mean" not in f_ch1 or "max_ch1" not in f_ch1 or "ch1_min" not in f_ch1:
+        if (
+            "ch1ped_mean" not in f_ch1
+            or "max_ch1" not in f_ch1
+            or "ch1_min" not in f_ch1
+            or "tmax_ch1" not in f_ch1
+        ):
             raise KeyError(
-                f"{ch1_param_path.name} 中缺少 ch1ped_mean / max_ch1 / ch1_min 之一，"
+                f"{ch1_param_path.name} 中缺少 ch1ped_mean / max_ch1 / ch1_min / tmax_ch1 之一，"
                 "请确认该文件由当前版本的 preprocessor.py 生成。"
             )
         ch1_ped_mean = np.asarray(f_ch1["ch1ped_mean"][...], dtype=np.float64)
         max_ch1 = np.asarray(f_ch1["max_ch1"][...], dtype=np.float64)
         ch1_min = np.asarray(f_ch1["ch1_min"][...], dtype=np.float64)
+        tmax_ch1 = np.asarray(f_ch1["tmax_ch1"][...], dtype=np.float64)
 
     ch4_param_path = CH4_PARAM_DIR / ch0_param_path.name
     with h5py.File(ch4_param_path, "r") as f_ch4:
@@ -152,7 +179,7 @@ def _load_basic_features_for_run(
         max_ch4 = np.asarray(f_ch4["max_ch4"][...], dtype=np.float64)
         tmax_ch4 = np.asarray(f_ch4["tmax_ch4"][...], dtype=np.float64)
 
-    n0, nmin, n5, nped0, nped1, n1, nc1min, n4, nt4 = (
+    n0, nmin, n5, nped0, nped1, n1, nc1min, n4, nt4, nt0, nt1 = (
         max_ch0.shape[0],
         ch0_min.shape[0],
         max_ch5.shape[0],
@@ -162,9 +189,11 @@ def _load_basic_features_for_run(
         ch1_min.shape[0],
         max_ch4.shape[0],
         tmax_ch4.shape[0],
+        tmax_ch0.shape[0],
+        tmax_ch1.shape[0],
     )
-    n = min(n0, nmin, n5, nped0, nped1, n1, nc1min, n4, nt4)
-    if not (n0 == nmin == n5 == nped0 == nped1 == n1 == nc1min == n4 == nt4):
+    n = min(n0, nmin, n5, nped0, nped1, n1, nc1min, n4, nt4, nt0, nt1)
+    if not (n0 == nmin == n5 == nped0 == nped1 == n1 == nc1min == n4 == nt4 == nt0 == nt1):
         print(
             f"[警告] 事件数不一致，仅使用前 {n} 个事件。"
         )
@@ -177,8 +206,22 @@ def _load_basic_features_for_run(
     ch1_min = ch1_min[:n]
     max_ch4 = max_ch4[:n]
     tmax_ch4 = tmax_ch4[:n]
+    tmax_ch0 = tmax_ch0[:n]
+    tmax_ch1 = tmax_ch1[:n]
 
-    return max_ch0, ch0_min, max_ch5, ch0_ped_mean, ch1_ped_mean, max_ch1, ch1_min, max_ch4, tmax_ch4
+    return (
+        max_ch0,
+        ch0_min,
+        max_ch5,
+        ch0_ped_mean,
+        ch1_ped_mean,
+        max_ch1,
+        ch1_min,
+        max_ch4,
+        tmax_ch4,
+        tmax_ch0,
+        tmax_ch1,
+    )
 
 # -----------------------------------------------------------------------------
 # 独立的 cut 函数：输入为对应参数数组，输出为 bool 掩码
@@ -214,14 +257,14 @@ def cut_pedestal_3sigma(
     max_ch5: np.ndarray,
     rt_threshold: float = 6000.0,
     n_sigma: float = 3.0,
-    min_rt_events: int = 10,) -> np.ndarray:
+    min_rt_events: int = 10,
+    ) -> np.ndarray:
     """
     前沿基线 cut：使用随机触发事例 (max_ch5 > rt_threshold) 的 CH0/CH1 pedestal 分别拟合高斯，
-    保留 |ch0_ped - μ0| <= n_sigma*σ0 且 |ch1_ped - μ1| <= n_sigma*σ1 的事件。
-    若 RT 事例不足或 σ=0，对应通道返回全 True 掩码（不剔除）。
+    保留 |ch0_ped - μ0| <= n_sigma*σ0 且 |ch1_ped - μ1| <= n_sigma*σ1 的事件。若 RT 事例不足或 σ=0，对应通道返回全 True 掩码（不剔除）。
     输入: ch0_ped_mean, ch1_ped_mean, max_ch5
-    输出: bool 掩码
-    """
+    输出: bool 掩码"""
+
     n = ch0_ped_mean.shape[0]
     mask = np.ones(n, dtype=bool)
     rt_mask = max_ch5 > rt_threshold
@@ -359,6 +402,174 @@ def cut_pncut(
 
     return band_mask
 
+def cut_ch0max_tmax(
+    base_mask: np.ndarray,
+    max_ch0: np.ndarray,
+    tmax_ch0: np.ndarray,
+    fit_x_min: float = 1160.0,
+    fit_y_min: float = 10200.0,
+    fit_y_max: float = 13500.0,
+    n_sigma: float = 3.0,
+    min_fit_events: int = 10,) -> np.ndarray:
+    """
+    CH0 max vs tmax(CH0) 相关带 cut（与 maxch0-tmax 相同模型与拟合窗口）：
+    在 base_mask 为 True 且 x∈(fit_x_min,∞)、y∈(fit_y_min, fit_y_max) 的子集上拟合
+    y = a·ln(x−b) + c·x + d/x；σ 为拟合残差标准差；
+    保留 |tmax_ch0 − ŷ(max_ch0)| <= n_sigma * σ 的事件（默认 3σ，与图中红色带一致）。
+    若拟合样本不足、curve_fit 失败或 σ=0，则返回与 base_mask 相同的掩码（不额外剔除）。
+    对 max_ch0 <= b 无法定义 ŷ 的位置，视为不通过本 cut（False）。
+    输入: base_mask, max_ch0, tmax_ch0
+    输出: bool 掩码
+    """
+    def _model(
+        x: np.ndarray, a: float, b: float, c: float, d: float
+    ) -> np.ndarray:
+        """y = a·ln(x−b) + c·x + d/x，要求 x > b（与 maxch0-tmax 一致）。"""
+        return a * np.log(x - b) + c * x + d / x
+
+    n = max_ch0.shape[0]
+    assert tmax_ch0.shape[0] == n and base_mask.shape[0] == n
+
+    max_ch0 = np.asarray(max_ch0, dtype=np.float64)
+    tmax_ch0 = np.asarray(tmax_ch0, dtype=np.float64)
+
+    fit_mask = (
+        base_mask
+        & (max_ch0 > fit_x_min)
+        & (tmax_ch0 > fit_y_min)
+        & (tmax_ch0 < fit_y_max)
+    )
+    xf = max_ch0[fit_mask]
+    yf = tmax_ch0[fit_mask]
+    if xf.size < max(4, min_fit_events):
+        return base_mask.copy()
+
+    xmin = float(np.min(xf))
+    b_hi = xmin - 1e-9
+    A0 = np.column_stack([np.log(xf), xf, 1.0 / xf])
+    coef0, _, rank0, _ = np.linalg.lstsq(A0, yf, rcond=None)
+    if rank0 < 3:
+        return base_mask.copy()
+    a0, c0, d0 = float(coef0[0]), float(coef0[1]), float(coef0[2])
+    b0 = min(xmin * 0.5, xmin - 200.0)
+    p0 = np.array([a0, b0, c0, d0], dtype=np.float64)
+    bounds = (
+        [-np.inf, -np.inf, -np.inf, -np.inf],
+        [np.inf, b_hi, np.inf, np.inf],
+    )
+    try:
+        popt, _ = curve_fit(
+            _model,
+            xf,
+            yf,
+            p0=p0,
+            bounds=bounds,
+            maxfev=100000,
+        )
+    except (ValueError, RuntimeError):
+        return base_mask.copy()
+    a, b, c, d = float(popt[0]), float(popt[1]), float(popt[2]), float(popt[3])
+    if not np.isfinite([a, b, c, d]).all():
+        return base_mask.copy()
+    y_hat_fit = _model(xf, a, b, c, d)
+    sigma = float(np.std(yf - y_hat_fit))
+    if sigma <= 0.0:
+        return base_mask.copy()
+
+    x_all = max_ch0
+    valid = x_all > b + 1e-9
+    y_pred = np.empty(n, dtype=np.float64)
+    y_pred[:] = np.nan
+    y_pred[valid] = _model(x_all[valid], a, b, c, d)
+    resid = tmax_ch0 - y_pred
+    in_band = np.zeros(n, dtype=bool)
+    in_band[valid] = np.abs(resid[valid]) <= n_sigma * sigma
+    return in_band
+
+def cut_ch1max_tmax(
+    base_mask: np.ndarray,
+    max_ch1: np.ndarray,
+    tmax_ch1: np.ndarray,
+    fit_x_min: float = 1350.0,
+    fit_y_min: float = 11000.0,
+    fit_y_max: float = 17500.0,
+    n_sigma: float = 1.0,
+    min_fit_events: int = 10,) -> np.ndarray:
+    """
+    CH1 max vs tmax(CH1) 相关带 cut（与 maxch1-tmax 相同模型与拟合窗口）：
+    在 base_mask 为 True 且 x∈(fit_x_min,∞)、y∈(fit_y_min, fit_y_max) 的子集上拟合
+    y = a·ln(x−b) + c·x + d/x；σ 为拟合残差标准差；
+    保留 |tmax_ch1 − ŷ(max_ch1)| <= n_sigma * σ 的事件（默认 1σ，与图中红色带一致）。
+    若拟合样本不足、curve_fit 失败或 σ=0，则返回与 base_mask 相同的掩码（不额外剔除）。
+    对 max_ch1 <= b 无法定义 ŷ 的位置，视为不通过本 cut（False）。
+    输入: base_mask, max_ch1, tmax_ch1
+    输出: bool 掩码
+    """
+    def _model(
+        x: np.ndarray, a: float, b: float, c: float, d: float
+    ) -> np.ndarray:
+        return a * np.log(x - b) + c * x + d / x
+
+    n = max_ch1.shape[0]
+    assert tmax_ch1.shape[0] == n and base_mask.shape[0] == n
+
+    max_ch1 = np.asarray(max_ch1, dtype=np.float64)
+    tmax_ch1 = np.asarray(tmax_ch1, dtype=np.float64)
+
+    fit_mask = (
+        base_mask
+        & (max_ch1 > fit_x_min)
+        & (tmax_ch1 > fit_y_min)
+        & (tmax_ch1 < fit_y_max)
+    )
+    xf = max_ch1[fit_mask]
+    yf = tmax_ch1[fit_mask]
+    if xf.size < max(4, min_fit_events):
+        return base_mask.copy()
+
+    xmin = float(np.min(xf))
+    b_hi = xmin - 1e-9
+    A0 = np.column_stack([np.log(xf), xf, 1.0 / xf])
+    coef0, _, rank0, _ = np.linalg.lstsq(A0, yf, rcond=None)
+    if rank0 < 3:
+        return base_mask.copy()
+    a0, c0, d0 = float(coef0[0]), float(coef0[1]), float(coef0[2])
+    b0 = min(xmin * 0.5, xmin - 200.0)
+    p0 = np.array([a0, b0, c0, d0], dtype=np.float64)
+    bounds = (
+        [-np.inf, -np.inf, -np.inf, -np.inf],
+        [np.inf, b_hi, np.inf, np.inf],
+    )
+    try:
+        popt, _ = curve_fit(
+            _model,
+            xf,
+            yf,
+            p0=p0,
+            bounds=bounds,
+            maxfev=100000,
+        )
+    except (ValueError, RuntimeError):
+        return base_mask.copy()
+    a, b, c, d = float(popt[0]), float(popt[1]), float(popt[2]), float(popt[3])
+    if not np.isfinite([a, b, c, d]).all():
+        return base_mask.copy()
+    y_hat_fit = _model(xf, a, b, c, d)
+    sigma = float(np.std(yf - y_hat_fit))
+    if sigma <= 0.0:
+        return base_mask.copy()
+
+    x_all = max_ch1
+    valid = x_all > b + 1e-9
+    y_pred = np.empty(n, dtype=np.float64)
+    y_pred[:] = np.nan
+    y_pred[valid] = _model(x_all[valid], a, b, c, d)
+    resid = tmax_ch1 - y_pred
+    in_band = np.zeros(n, dtype=bool)
+    in_band[valid] = np.abs(resid[valid]) <= n_sigma * sigma
+    return in_band
+
+
 # -----------------------------------------------------------------------------
 # 临时测试函数（之后可删）
 # -----------------------------------------------------------------------------
@@ -412,8 +623,6 @@ def _plot_ch0max_hist_passing_cuts(
     plt.tight_layout()
     plt.show()
 
-
-
 if __name__ == "__main__":
     pairs = _list_paired_param_files()
     print(f"找到 {len(pairs)} 个可配对的参数文件。")
@@ -426,8 +635,12 @@ if __name__ == "__main__":
     all_ch1_min: List[np.ndarray] = []
     all_max_ch4: List[np.ndarray] = []
     all_tmax_ch4: List[np.ndarray] = []
+    all_tmax_ch0: List[np.ndarray] = []
+    all_tmax_ch1: List[np.ndarray] = []
     for ch0_path, ch5_path in pairs:
-        m0, cmin, m5, ped0, ped1, m1, c1min, m4, t4 = _load_basic_features_for_run(ch0_path, ch5_path)
+        m0, cmin, m5, ped0, ped1, m1, c1min, m4, t4, tc0, tc1 = _load_basic_features_for_run(
+            ch0_path, ch5_path
+        )
         all_max_ch0.append(m0)
         all_ch0_min.append(cmin)
         all_max_ch5.append(m5)
@@ -437,6 +650,8 @@ if __name__ == "__main__":
         all_ch1_min.append(c1min)
         all_max_ch4.append(m4)
         all_tmax_ch4.append(t4)
+        all_tmax_ch0.append(tc0)
+        all_tmax_ch1.append(tc1)
     max_ch0 = np.concatenate(all_max_ch0)
     ch0_min = np.concatenate(all_ch0_min)
     max_ch5 = np.concatenate(all_max_ch5)
@@ -446,6 +661,8 @@ if __name__ == "__main__":
     ch1_min = np.concatenate(all_ch1_min)
     max_ch4 = np.concatenate(all_max_ch4)
     tmax_ch4 = np.concatenate(all_tmax_ch4)
+    tmax_ch0 = np.concatenate(all_tmax_ch0)
+    tmax_ch1 = np.concatenate(all_tmax_ch1)
 
     n_raw = max_ch0.shape[0]
     print(f"\n原始事件数: {n_raw}")
@@ -471,18 +688,27 @@ if __name__ == "__main__":
     n5 = int(m5.sum())
     print(f"cut_act 单独使用后: {n5} / {n_raw}")
 
-    m6 = cut_mincut(ch0_min, ch1_min, max_ch5, max_ch4, tmax_ch4)
+    m6 = cut_mincut(ch0_min, ch1_min, max_ch4, tmax_ch4)
     n6 = int(m6.sum())
     print(f"cut_mincut 单独使用后: {n6} / {n_raw}")
 
-    # 2. 依次使用七种 cut 后剩余
-    mask = m1 & m2 & m3 & m4 & m5 & m6
-    pn_mask = cut_pncut(mask, max_ch0, max_ch1)
+    m7 = cut_ch0max_tmax(m1 & m2 & m3 & m4 & m5 & m6, max_ch0, tmax_ch0)
+    n7 = int((m1 & m2 & m3 & m4 & m5 & m6 & m7).sum())
+    print(f"cut_ch0max_tmax 单独使用后: {n7} / {n_raw}")
+
+    m8 = cut_pncut(m1 & m2 & m3 & m4 & m5 & m6 & m7, max_ch0, max_ch1)
+    n8 = int((m1 & m2 & m3 & m4 & m5 & m6 & m7 & m8).sum())
+    print(f"cut_pncut 单独使用后: {n8} / {n_raw}")
+
+    m9 = cut_ch1max_tmax(m1 & m2 & m3 & m4 & m5 & m6 & m7 & m8, max_ch1, tmax_ch1)
+    n9 = int((m1 & m2 & m3 & m4 & m5 & m6 & m7 & m8 & m9).sum())
+    print(f"cut_ch1max_tmax 单独使用后: {n9} / {n_raw}")
+
+    # 2. 依次使用九种 cut 后剩余（与上面 m1~m9 定义一致）
+    mask = m1 & m2 & m3 & m4 & m5 & m6 & m7 & m9
+    mask = m1 & m2 & m4 & m5 & m6 & m8 
     n_final = int(mask.sum())
-    print(f"\n依次使用6种 cut 后最终剩余: {n_final} / {n_raw}")
-    # mask = mask & pn_mask
-    # n_final = int(mask.sum())
-    # print(f"\n依次使用七种 cut 后最终剩余: {n_final} / {n_raw}")
+    print(f"\n依次使用 cut 后最终剩余: {n_final} / {n_raw}")
 
     # 3. 绘制最终剩余事件的 CH0max 直方图 和 CH0max vs CH1max 散点图
     _plot_ch0max_hist_passing_cuts(mask, max_ch0, max_ch1)

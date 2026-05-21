@@ -22,6 +22,126 @@ from scipy.optimize import curve_fit
 current_dir = os.path.dirname(os.path.abspath(__file__))
 cut_dir = os.path.dirname(current_dir)
 
+
+def _annotate_tanh_fit_parameters(
+    ax,
+    p0: float,
+    p1: float,
+    p2: float,
+    p3: float,
+    fs_legend: int,
+) -> None:
+    """
+    在拟合 tanh 上标注物理量（与拟合参数对应）：
+    - famp：低/高渐近线之间的总幅度（竖直双箭头）
+    - fcross：过渡中心时间 p2（拐点处及指向时间轴的箭头）
+    - fped：拐点幅值 p3（指向幅值轴的箭头）
+    - fslope：拐点处最大斜率 0.5*p0*p1（切向短线 + 标注）
+
+    模型：y = 0.5*p0*tanh(p1*(x-p2)) + p3
+    """
+    xlim = ax.get_xlim()
+    ylim = ax.get_ylim()
+    xi, yi = float(p2), float(p3)
+
+    # 渐近线幅值（tanh 从 -1 到 +1）
+    y_lo = p3 - 0.5 * p0
+    y_hi = p3 + 0.5 * p0
+    fslope_val = 0.5 * p0 * p1
+
+    kw_arrow = dict(arrowstyle="->", color="0.25", lw=1.4, shrinkA=0, shrinkB=0)
+    kw_text = dict(fontsize=fs_legend, color="0.15")
+
+    # 拐点
+    ax.plot([xi], [yi], "o", color="crimson", markersize=7, zorder=5)
+
+    # 水平箭头：拐点 → y 轴，在 y 轴一侧标注 fped
+    x_left = xlim[0]
+    ax.annotate(
+        "",
+        xy=(x_left, yi),
+        xytext=(xi, yi),
+        arrowprops=kw_arrow,
+        zorder=4,
+    )
+    ax.text(
+        x_left + 0.012 * (xlim[1] - xlim[0]),
+        yi + 0.03 * (ylim[1] - ylim[0]),
+        "fped",
+        ha="left",
+        va="bottom",
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=0.1),
+        **kw_text,
+    )
+
+    # 竖直箭头：拐点 → x 轴，在 x 轴一侧标注 fcross
+    y_bot = ylim[0]
+    ax.annotate(
+        "",
+        xy=(xi, y_bot),
+        xytext=(xi, yi),
+        arrowprops=kw_arrow,
+        zorder=4,
+    )
+    ax.text(
+        xi + 0.01 * (xlim[1] - xlim[0]),
+        y_bot + 0.06 * (ylim[1] - ylim[0]),
+        "fcross",
+        ha="left",
+        va="bottom",
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=0.1),
+        **kw_text,
+    )
+
+    # 拐点旁标注 fcross（时间位置）
+    ax.text(
+        xi + 0.012 * (xlim[1] - xlim[0]),
+        yi + 0.012 * (ylim[1] - ylim[0]),
+        "  fcross",
+        ha="left",
+        va="bottom",
+        fontsize=fs_legend,
+        color="crimson",
+    )
+
+    # 竖直双箭头：低渐近 → 高渐近，标注 famp（略偏右避免与曲线重叠）
+    span = xlim[1] - xlim[0]
+    x_amp = min(xlim[1] - 0.02 * span, xi + 0.06 * span)
+    if x_amp <= xi:
+        x_amp = xi + 0.04 * span
+    y_lo_c = max(y_lo, ylim[0])
+    y_hi_c = min(y_hi, ylim[1])
+    if y_hi_c > y_lo_c:
+        ax.annotate(
+            "",
+            xy=(x_amp, y_hi_c),
+            xytext=(x_amp, y_lo_c),
+            arrowprops=dict(arrowstyle="<->", color="0.35", lw=1.5),
+            zorder=3,
+        )
+        ax.text(
+            x_amp + 0.012 * span,
+            0.5 * (y_lo_c + y_hi_c),
+            "famp",
+            ha="left",
+            va="center",
+            fontsize=fs_legend,
+            color="0.2",
+        )
+
+    # 最大斜率处只标注 fslope，不再绘制切线
+    ax.text(
+        xi + 0.02 * span,
+        yi + 0.08 * (ylim[1] - ylim[0]),
+        f"fslope ({fslope_val:.3g})",
+        ha="left",
+        va="bottom",
+        fontsize=fs_legend,
+        color="darkgreen",
+        bbox=dict(facecolor="white", edgecolor="none", alpha=0.75, pad=0.1),
+    )
+
+
 def _resolve_ch0_3_file(ch0_3_file: Optional[str]) -> str:
     """当 ch0_3_file 为 None 时，自动查找 CH0-3 文件。"""
     if ch0_3_file is not None:
@@ -104,6 +224,7 @@ def _visualize_single_event(
         return 0.5 * p0 * np.tanh(p1 * (x - p2)) + p3
 
     fit_curve = None
+    popt = None
     try:
         baseline_window_us = 2.0
         samples_baseline = int(round(baseline_window_us * 1000.0 / sampling_interval_ns))
@@ -115,7 +236,6 @@ def _visualize_single_event(
 
         if max_amp > 0:
             idx_max = int(np.argmax(amp))
-            t_max = float(time_axis_us[idx_max])
             # 拟合范围：从起点到峰值再往后 2000 个点
             n_samples = len(time_axis_us)
             idx_end = min(idx_max + 2000, n_samples - 1)
@@ -150,24 +270,32 @@ def _visualize_single_event(
     except Exception:
         pass
 
-    plt.rcParams.update({"font.family": "serif", "font.serif": ["Times New Roman"]})
+    # 与 parameter(ch0).py 一致的字体与字号
+    _FS_AXIS_LABEL = 20
+    _FS_TICK = 16
+    _FS_LEGEND = 16
+
+    plt.rcParams.update({
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial"],
+    })
     fig, ax = plt.subplots(1, 1, figsize=(6, 5))
 
-    ax.plot(time_axis_us, waveform_smooth, color="blue", linewidth=1, label="Waveform (smoothed)")
+    ax.plot(time_axis_us, waveform_smooth, linewidth=2.2, label="Waveform (smoothed)")
     if fit_curve is not None:
         ax.plot(time_axis_us, fit_curve, color="red", linewidth=3, linestyle="--", label="tanh fit")
 
-    ax.set_xlabel("Time (µs)", fontsize=18, fontweight="bold")
-    ax.set_ylabel("Amplitude (ADC)", fontsize=18, fontweight="bold")
+    ax.set_xlabel("Time (µs)", fontsize=_FS_AXIS_LABEL)
+    ax.set_ylabel("Amplitude (ADC)", fontsize=_FS_AXIS_LABEL)
     ax.set_ylim(y_min, y_max)
+    ax.tick_params(axis="both", which="major", labelsize=_FS_TICK)
     ax.grid(True, alpha=0.3)
-    for tick in ax.xaxis.get_major_ticks():
-        tick.label1.set_fontweight("bold")
-    for tick in ax.yaxis.get_major_ticks():
-        tick.label1.set_fontweight("bold")
 
-    filename = os.path.basename(ch0_3_file)
-    ax.set_title(f"CH3 Waveform (tanh fit)\n{filename}  |  Event #{event_index}", fontsize=13, fontweight="bold")
+    if popt is not None:
+        p0v, p1v, p2v, p3v = (float(popt[0]), float(popt[1]), float(popt[2]), float(popt[3]))
+        _annotate_tanh_fit_parameters(ax, p0v, p1v, p2v, p3v, _FS_LEGEND)
+
+    ax.legend(loc="upper right", fontsize=_FS_LEGEND)
     fig.tight_layout()
 
     if save_path is None:

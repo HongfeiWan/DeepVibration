@@ -294,7 +294,7 @@ if __name__ == "__main__":
     xmin_ch1 = mu_ch1 - nsigma_display * sigma_ch1
     xmax_ch1 = mu_ch1 + nsigma_display * sigma_ch1
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=True)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), sharey=False)
 
     # CH0 minimum distribution
     ax0 = axes[0]
@@ -303,20 +303,17 @@ if __name__ == "__main__":
         bins=bins_count,
         range=(xmin_ch0, xmax_ch0),
         histtype="step",
-        color="b",
-        linewidth=0.8,
-        alpha=0.8,
+        color="C0",
         label="CH0 A_min",
     )
-    ax0.axvline(mu_ch0, color="r", linestyle="--", linewidth=1, alpha=0.8, label=r"$\mu$")
-    ax0.axvline(lo_ch0, color="g", linestyle=":", linewidth=1, alpha=0.8, label=r"$\mu \pm 3\sigma$")
-    ax0.axvline(hi_ch0, color="g", linestyle=":", linewidth=1, alpha=0.8)
-    ax0.set_xlabel("A_min (CH0)", fontsize=9)
-    ax0.set_ylabel("Counts", fontsize=9)
-    ax0.set_title(f"CH0 Minimum Distribution\n(μ±6σ, bins={bins_count})", fontsize=10)
+    ax0.axvline(mu_ch0, color="C1", linestyle="--", label=r"$\mu$")
+    ax0.axvline(lo_ch0, color="g", linestyle=":", label=r"$\mu \pm 3\sigma$")
+    ax0.axvline(hi_ch0, color="g", linestyle=":")
+    ax0.set_xlabel("A_min (CH0)")
+    ax0.set_ylabel("Counts")
     ax0.set_xlim(xmin_ch0, xmax_ch0)
     ax0.grid(True, alpha=0.3)
-    ax0.legend(fontsize=8)
+    ax0.legend()
 
     # CH1 minimum distribution
     ax1 = axes[1]
@@ -325,28 +322,16 @@ if __name__ == "__main__":
         bins=bins_count,
         range=(xmin_ch1, xmax_ch1),
         histtype="step",
-        color="b",
-        linewidth=0.8,
-        alpha=0.8,
+        color="C0",
         label="CH1 A_min",
     )
-    ax1.axvline(mu_ch1, color="r", linestyle="--", linewidth=1, alpha=0.8, label=r"$\mu$")
-    ax1.axvline(lo_ch1, color="g", linestyle=":", linewidth=1, alpha=0.8, label=r"$\mu \pm 3\sigma$")
-    ax1.axvline(hi_ch1, color="g", linestyle=":", linewidth=1, alpha=0.8)
-    ax1.set_xlabel("A_min (CH1)", fontsize=9)
-    ax1.set_ylabel("Counts", fontsize=9)
-    ax1.set_title(f"CH1 Minimum Distribution\n(μ±6σ, bins={bins_count})", fontsize=10)
+    ax1.axvline(mu_ch1, color="C1", linestyle="--", label=r"$\mu$")
+    ax1.axvline(lo_ch1, color="g", linestyle=":", label=r"$\mu \pm 3\sigma$")
+    ax1.axvline(hi_ch1, color="g", linestyle=":")
+    ax1.set_xlabel("A_min (CH1)")
     ax1.set_xlim(xmin_ch1, xmax_ch1)
-    ax1.grid(True, alpha=0.3)
-    ax1.legend(fontsize=8)
+    ax1.legend()
 
-    plt.suptitle(
-        f"Minimum Value Distribution (Min Cut)\n"
-        f"Total events: {use_events}, "
-        f"Passed: {int(keep_mask.sum())} ({keep_mask.mean() * 100:.2f}%)",
-        fontsize=12,
-        y=0.995,
-    )
     plt.tight_layout()
     plt.show()
 
