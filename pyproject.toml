@@ -19,6 +19,7 @@ dependencies = [
 [project.optional-dependencies]
 signal = ["PyWavelets", "joblib"]
 environment = ["pandas"]
+ml = ["scikit-learn", "umap-learn", "hdbscan", "threadpoolctl", "joblib"]
 dev = ["pytest"]
 
 [tool.setuptools]
@@ -26,4 +27,4 @@ package-dir = {"" = "python"}
 
 [tool.setuptools.packages.find]
 where = ["python"]
-include = ["analysis*", "utils*"]
+include = ["analysis*"]

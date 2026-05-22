@@ -73,7 +73,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         default=None,
         help="Optional directory for per-run mask HDF5 files.",
     )
-    add_parallel_arguments(parser)
+    add_parallel_arguments(parser, include_chunk_size=True)
     return parser.parse_args(argv)
 
 

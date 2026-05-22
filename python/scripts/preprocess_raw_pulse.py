@@ -9,23 +9,21 @@ import sys
 import struct
 import time
 import argparse
-from concurrent.futures import ProcessPoolExecutor, as_completed
 
 # 添加父目录到路径，以便导入utils模块
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
-from analysis.parallel import add_parallel_arguments, resolve_workers
+from analysis.parallel import add_parallel_arguments, config_from_args, iter_completed, resolve_workers
 import h5py
 import numpy as np
 import psutil
 import gc
 
-from utils.save import save_hdf5
+from analysis.io.writers import save_hdf5
 
 # 定义文件路径和文件名（相对于项目根目录）
-# 从 python/data/ 目录到项目根目录的 data/ 目录
 project_root = os.path.dirname(os.path.dirname(current_dir))
 read_path = os.path.join(project_root, 'data', 'bin')
 
@@ -650,12 +648,26 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Convert V1725 raw .bin files to HDF5 raw pulses and parameter files."
     )
-    add_parallel_arguments(parser)
+    add_parallel_arguments(parser, include_chunk_size=True)
     parser.add_argument("--run-start", type=int, default=RUN_Start_NUMBER)
     parser.add_argument("--run-end", type=int, default=RUN_End_NUMBER)
     parser.add_argument("--filename-input", default=filename_input)
     parser.add_argument("--event-number", type=int, default=EVENT_NUMBER)
     return parser.parse_args(argv)
+
+
+def _run_preprocess_task(item):
+    kind, desc, payload = item
+    try:
+        if kind == "bin":
+            bin2rawpulse(*payload)
+        elif kind == "params":
+            compute_parameters_from_existing_h5(*payload)
+        else:
+            raise ValueError(f"unknown preprocess task kind: {kind}")
+        return desc, None
+    except Exception as exc:
+        return desc, str(exc)
 
 
 def main(argv=None):
@@ -741,42 +753,23 @@ def main(argv=None):
     success_count = 0
     fail_count = 0
 
-    # 使用进程池并行执行：既包含 bin2rawpulse 任务，也包含仅参数任务
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        future_to_desc = {}
+    work_items = []
+    for run_filename, channel_list, event_number, save_path, ch0param_dir in tasks:
+        desc = f'bin2rawpulse: {run_filename} (通道: {channel_list})'
+        work_items.append(("bin", desc, (run_filename, channel_list, event_number, save_path, ch0param_dir)))
+    for output_file, channel_list, ch0param_dir in param_tasks:
+        desc = f'compute_parameters_from_existing_h5: {output_file} (通道: {channel_list})'
+        work_items.append(("params", desc, (output_file, channel_list, ch0param_dir)))
 
-        # 提交 bin 解析任务
-        for run_filename, channel_list, event_number, save_path, ch0param_dir in tasks:
-            fut = executor.submit(
-                bin2rawpulse,
-                run_filename,
-                channel_list,
-                event_number,
-                save_path,
-                ch0param_dir,
-            )
-            future_to_desc[fut] = f'bin2rawpulse: {run_filename} (通道: {channel_list})'
-
-        # 提交仅参数任务
-        for output_file, channel_list, ch0param_dir in param_tasks:
-            fut = executor.submit(
-                compute_parameters_from_existing_h5,
-                output_file,
-                channel_list,
-                ch0param_dir,
-            )
-            future_to_desc[fut] = f'compute_parameters_from_existing_h5: {output_file} (通道: {channel_list})'
-
-        # 收集结果
-        for fut in as_completed(future_to_desc):
-            desc = future_to_desc[fut]
-            try:
-                fut.result()
-                success_count += 1
-                print(f'[成功 {success_count}] {desc}')
-            except Exception as e:
-                fail_count += 1
-                print(f'[失败 {fail_count}] {desc} 时出错: {e}')
+    # 使用统一并行层执行：外层按 run/channel 任务并行，worker 内限制 BLAS 线程。
+    parallel_config = config_from_args(args)
+    for _, (desc, error) in iter_completed(_run_preprocess_task, work_items, config=parallel_config):
+        if error is None:
+            success_count += 1
+            print(f'[成功 {success_count}] {desc}')
+        else:
+            fail_count += 1
+            print(f'[失败 {fail_count}] {desc} 时出错: {error}')
 
     elapsed_time = time.time() - start_time
     print('=' * 60)

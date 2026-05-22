@@ -52,4 +52,28 @@ def compute_spectral_centroid_mhz(
     return float(np.sum(freq[non_dc] * power[non_dc]) / total) * 1e-6
 
 
-__all__ = ["compute_highfreq_energy_ratio", "compute_spectral_centroid_mhz"]
+def _compute_fast_highfreq_energy_ratio(
+    waveform: np.ndarray,
+    sampling_interval_ns: float = 4.0,
+    cutoff_mhz: float = 0.2,
+) -> float:
+    return compute_highfreq_energy_ratio(
+        waveform,
+        sampling_interval_ns=sampling_interval_ns,
+        cutoff_mhz=cutoff_mhz,
+    )
+
+
+def _compute_spectral_centroid_mhz(
+    waveform: np.ndarray,
+    sampling_interval_ns: float = 4.0,
+) -> float:
+    return compute_spectral_centroid_mhz(waveform, sampling_interval_ns=sampling_interval_ns)
+
+
+__all__ = [
+    "_compute_fast_highfreq_energy_ratio",
+    "_compute_spectral_centroid_mhz",
+    "compute_highfreq_energy_ratio",
+    "compute_spectral_centroid_mhz",
+]

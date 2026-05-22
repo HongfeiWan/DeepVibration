@@ -24,19 +24,24 @@ python/
 │   ├── features/               # 波形、pedestal、频域特征
 │   ├── cuts/                   # RT / Inhibit / Physical / ACT / ACV / mincut / pncut
 │   ├── pipelines/              # 多个 cut 的组合流程
-│   └── plotting/               # 波形、能谱等绘图工具
+│   ├── environment/            # 振动、温度、压缩机环境量
+│   ├── ml/                     # PCA / UMAP / HDBSCAN / GMM / LedoitWolf
+│   ├── plotting/               # 波形、能谱等绘图工具
+│   ├── simulation/             # 模拟与动力学工具
+│   └── legacy/                 # 已迁出 data 的历史研究脚本，统一蛇形命名
 ├── scripts/                    # 正式批处理入口
 │   ├── preprocess_raw_pulse.py  # bin -> raw_pulse HDF5 + CH0/1/4/5 参数
 │   ├── build_parameters.py      # CH2/CH3 拟合与频域参数
 │   ├── run_cuts.py              # 批量 Physical / ACT / ACV cut
+│   ├── analyze_signal.py        # FFT / Lomb / Hilbert / Wavelet
+│   ├── run_ml.py                # 参数矩阵 ML 分析
+│   ├── plot_environment.py      # 环境量总览图
 │   └── plot_spectrum.py         # 参数文件能谱绘图
 ├── examples/                   # 独立物理示例
 │   ├── rt_selection.py
 │   ├── inhibit_selection.py
 │   ├── physical_act_acv.py
 │   └── pncut_efficiency.py
-├── data/                       # 历史分析脚本，逐步迁移到 analysis/scripts/examples
-└── utils/                      # 旧工具函数，当前仍被部分脚本引用
 ```
 
 真实实验数据仍放在仓库根目录的 `data/` 下，并由 `.gitignore` 排除。
@@ -60,14 +65,18 @@ python/
 4. `python/scripts/plot_spectrum.py`
    - 从 `CH0_parameters/max_ch0` 和可选 cut mask 生成能谱
 
+5. `python/scripts/analyze_signal.py` / `python/scripts/run_ml.py`
+   - 对单事件波形做 FFT/Lomb/Hilbert/Wavelet
+   - 对参数矩阵做 PCA、UMAP、HDBSCAN、GMM 或 LedoitWolf
+
 ## Parallel Policy
 
 所有新的批量入口统一使用 `analysis.parallel`：
 
 ```bash
-python python/scripts/preprocess_raw_pulse.py --workers auto
-python python/scripts/build_parameters.py --workers auto
-python python/scripts/run_cuts.py --mode act --workers auto
+python python/scripts/preprocess_raw_pulse.py --workers auto --chunk-size 1000
+python python/scripts/build_parameters.py --workers auto --chunk-size 1000
+python python/scripts/run_cuts.py --mode act --workers auto --chunk-size 1000
 ```
 
 `--workers auto` 默认使用 `os.cpu_count()` 返回的全部逻辑 CPU。需要限制资源时可手动指定：
@@ -76,7 +85,7 @@ python python/scripts/run_cuts.py --mode act --workers auto
 python python/scripts/build_parameters.py --workers 8
 ```
 
-为了避免多进程和 NumPy/BLAS 底层线程互相抢核，`analysis.parallel` 会默认把每个 worker 进程内的 BLAS 线程数限制为 1。
+为了避免多进程和 NumPy/BLAS 底层线程互相抢核，`analysis.parallel` 会默认把每个 worker 进程内的 BLAS 线程数限制为 1，并在 worker 内阻止再开一层进程池。
 
 ## Cut Definitions
 
@@ -130,6 +139,9 @@ PYTHONPATH=python python -m compileall python/analysis python/scripts python/exa
 python python/scripts/preprocess_raw_pulse.py --help
 python python/scripts/build_parameters.py --help
 python python/scripts/run_cuts.py --help
+python python/scripts/analyze_signal.py --help
+python python/scripts/run_ml.py --help
+python python/scripts/plot_environment.py --help
 ```
 
 ## Non-Python Code

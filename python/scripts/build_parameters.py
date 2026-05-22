@@ -29,7 +29,6 @@
 import os
 import sys
 import argparse
-from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Tuple
 
 
@@ -41,15 +40,21 @@ if parent_dir not in sys.path:
 
 project_root = os.path.dirname(parent_dir)         # 项目根目录
 
-from analysis.parallel import add_parallel_arguments, resolve_workers  # noqa: E402
+from analysis.parallel import (  # noqa: E402
+    ParallelConfig,
+    add_parallel_arguments,
+    config_from_args,
+    iter_completed,
+    resolve_workers,
+)
 import h5py
 import numpy as np
 
-from utils.fit import (  # type: ignore  # noqa: E402
+from analysis.features.fit import (  # noqa: E402
     _compute_fast_fit_params_with_npoints,
     _compute_fast_fit_npoints_only,
 )
-from utils.frequency import (  # type: ignore  # noqa: E402
+from analysis.features.frequency import (  # noqa: E402
     _compute_fast_highfreq_energy_ratio,
     _compute_spectral_centroid_mhz,
 )
@@ -59,6 +64,7 @@ ch0_3_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH0-3")
 ch2parameters_save_path = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH2_parameters")
 ch3parameters_save_path = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH3_parameters")
 WORKERS = "auto"
+PARALLEL_CONFIG = ParallelConfig()
 
 
 def _worker_count(maximum: int | None = None) -> int:
@@ -118,6 +124,21 @@ def _process_one_event(waveform: np.ndarray) -> Tuple[float, float, float, float
         float(spectral_centroid_mhz),
         n_points,
     )
+
+
+def _process_one_event_indexed(item):
+    ev, waveform = item
+    return ev, _process_one_event(waveform)
+
+
+def _compute_spectral_centroid_indexed(item):
+    ev, waveform = item
+    return ev, _compute_spectral_centroid_mhz(waveform, 4.0)
+
+
+def _compute_n_fit_points_indexed(item):
+    ev, waveform = item
+    return ev, _compute_fast_fit_npoints_only(waveform)
 
 def _fit_one_channel_for_file(
     ch0_3_file: str,
@@ -234,42 +255,33 @@ def _fit_one_channel_for_file(
     max_workers = _worker_count()
     print(f"使用 {max_workers} 个 CPU 核并行拟合通道 {channel_idx}。")
 
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = {}
-        for ev in range(n_events):
-            # 仅对通过基础 cut 的事件进行拟合；
-            # 未通过的事件保持初始化的异常值（bad_val）
-            if not mask_valid[ev]:
-                continue
-            wf_ev = waveforms[:, ev]
-            fut = executor.submit(_process_one_event, wf_ev)
-            futures[fut] = ev
+    jobs = [(ev, waveforms[:, ev]) for ev in range(n_events) if mask_valid[ev]]
+    total_to_fit = len(jobs)
+    if total_to_fit == 0:
+        print(f"通道 {channel_idx}: 无事件通过基础 cut，跳过拟合。")
+    else:
+        finished = 0
+        for _, (ev, result) in iter_completed(
+            _process_one_event_indexed,
+            jobs,
+            config=PARALLEL_CONFIG,
+        ):
+            p0, p1, p2, p3, rms, hfr, sc, n_pts = result
+            tanh_p0[ev] = p0
+            tanh_p1[ev] = p1
+            tanh_p2[ev] = p2
+            tanh_p3[ev] = p3
+            tanh_rms[ev] = rms
+            highfreq_ratio[ev] = hfr
+            spectral_centroid_mhz[ev] = sc
+            n_fit_points[ev] = int(n_pts)
+            finished += 1
 
-        # 简单进度统计：以“实际提交拟合的事件数”作为分母
-        total_to_fit = len(futures)
-        if total_to_fit == 0:
-            print(f"通道 {channel_idx}: 无事件通过基础 cut，跳过拟合。")
-        else:
-            finished = 0
-            for fut in as_completed(futures):
-                ev = futures[fut]
-                p0, p1, p2, p3, rms, hfr, sc, n_pts = fut.result()
-                tanh_p0[ev] = p0
-                tanh_p1[ev] = p1
-                tanh_p2[ev] = p2
-                tanh_p3[ev] = p3
-                tanh_rms[ev] = rms
-                highfreq_ratio[ev] = hfr
-                spectral_centroid_mhz[ev] = sc
-                n_fit_points[ev] = int(n_pts)
-
-                finished += 1
-
-            # 仅在完成时打印一次进度，节约输出和计算资源
-            print(
-                f"通道 {channel_idx} 拟合进度: "
-                f"{finished}/{total_to_fit} (100.0%)"
-            )
+        # 仅在完成时打印一次进度，节约输出和计算资源
+        print(
+            f"通道 {channel_idx} 拟合进度: "
+            f"{finished}/{total_to_fit} (100.0%)"
+        )
 
     with h5py.File(out_path, "w") as f_out:
         f_out.create_dataset("tanh_p0", data=tanh_p0)
@@ -393,18 +405,13 @@ def _backfill_spectral_centroid_for_param_dir(param_dir: str, channel_idx: int) 
             f"为 {os.path.basename(param_path)} 计算 {n_events} 个事件的频谱质心。"
         )
 
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            for ev in range(n_events):
-                wf_ev = waveforms[:, ev]
-                fut = executor.submit(_compute_spectral_centroid_mhz, wf_ev, 4.0)
-                futures[fut] = ev
-
-            finished = 0
-            for fut in as_completed(futures):
-                ev = futures[fut]
-                sc_array[ev] = np.float32(fut.result())
-                finished += 1
+        jobs = [(ev, waveforms[:, ev]) for ev in range(n_events)]
+        for _, (ev, sc_value) in iter_completed(
+            _compute_spectral_centroid_indexed,
+            jobs,
+            config=PARALLEL_CONFIG,
+        ):
+            sc_array[ev] = np.float32(sc_value)
 
         # 将结果追加写入参数文件
         with h5py.File(param_path, "a") as f_param:
@@ -499,17 +506,13 @@ def _backfill_n_fit_points_for_param_dir(param_dir: str, channel_idx: int) -> No
             f"为 {os.path.basename(param_path)} 重新计算 {n_events} 个事件的拟合点数。"
         )
 
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = {}
-            for ev in range(n_events):
-                wf_ev = waveforms[:, ev]
-                fut = executor.submit(_compute_fast_fit_npoints_only, wf_ev)
-                futures[fut] = ev
-
-            for fut in as_completed(futures):
-                ev = futures[fut]
-                n_pts = fut.result()
-                n_fit_points[ev] = int(n_pts)
+        jobs = [(ev, waveforms[:, ev]) for ev in range(n_events)]
+        for _, (ev, n_pts) in iter_completed(
+            _compute_n_fit_points_indexed,
+            jobs,
+            config=PARALLEL_CONFIG,
+        ):
+            n_fit_points[ev] = int(n_pts)
 
         with h5py.File(param_path, "a") as f_param: 
             if "n_fit_points" in f_param:
@@ -756,6 +759,15 @@ def _process_one_param_file_ped_pedt(
     except Exception as e:
         return f"[补写 ped/pedt] 处理失败: {param_path}, 错误: {e}"
 
+
+def _process_one_param_file_extrema_item(item) -> str:
+    return _process_one_param_file_extrema(*item)
+
+
+def _process_one_param_file_ped_pedt_item(item) -> str:
+    return _process_one_param_file_ped_pedt(*item)
+
+
 def _backfill_extrema_for_param_dir(param_dir: str, channel_idx: int) -> None:
     """
     为已有的 CH2/CH3 参数文件补写幅值极值及其时间点（采样点索引）：
@@ -793,21 +805,13 @@ def _backfill_extrema_for_param_dir(param_dir: str, channel_idx: int) -> None:
     worker_count = _worker_count(len(files))
     print(f"[补写 max/min/tmax/tmin] 启用文件级并行，worker={worker_count}。")
 
-    with ProcessPoolExecutor(max_workers=worker_count) as executor:
-        futures = [
-            executor.submit(
-                _process_one_param_file_extrema,
-                p,
-                channel_idx,
-                max_key,
-                min_key,
-                tmax_key,
-                tmin_key,
-            )
-            for p in files
-        ]
-        for fut in as_completed(futures):
-            print(fut.result())
+    jobs = [(p, channel_idx, max_key, min_key, tmax_key, tmin_key) for p in files]
+    for _, message in iter_completed(
+        _process_one_param_file_extrema_item,
+        jobs,
+        config=PARALLEL_CONFIG,
+    ):
+        print(message)
 
 
 def _backfill_ped_pedt_for_param_dir(param_dir: str, channel_idx: int, ped_samples: int = 500) -> None:
@@ -843,20 +847,13 @@ def _backfill_ped_pedt_for_param_dir(param_dir: str, channel_idx: int, ped_sampl
     worker_count = _worker_count(len(files))
     print(f"[补写 ped/pedt] 启用文件级并行，worker={worker_count}。")
 
-    with ProcessPoolExecutor(max_workers=worker_count) as executor:
-        futures = [
-            executor.submit(
-                _process_one_param_file_ped_pedt,
-                p,
-                channel_idx,
-                ped_mean_key,
-                pedt_mean_key,
-                ped_samples,
-            )
-            for p in files
-        ]
-        for fut in as_completed(futures):
-            print(fut.result())
+    jobs = [(p, channel_idx, ped_mean_key, pedt_mean_key, ped_samples) for p in files]
+    for _, message in iter_completed(
+        _process_one_param_file_ped_pedt_item,
+        jobs,
+        config=PARALLEL_CONFIG,
+    ):
+        print(message)
 
 
 
@@ -874,7 +871,7 @@ def parse_args(argv=None) -> argparse.Namespace:
         action="store_true",
         help="Skip supplemental backfills for existing CH2/CH3 parameter files.",
     )
-    add_parallel_arguments(parser)
+    add_parallel_arguments(parser, include_chunk_size=True)
     return parser.parse_args(argv)
 
 
@@ -886,9 +883,10 @@ def main(argv=None) -> None:
         2) 仅处理指定的某一个 h5：
            python python/scripts/build_parameters.py /path/to/CH0-3/xxx_processed.h5
     """
-    global WORKERS
+    global WORKERS, PARALLEL_CONFIG
     args = parse_args(argv)
     WORKERS = args.workers
+    PARALLEL_CONFIG = config_from_args(args)
 
     if args.h5_file is None:
         # 批处理模式：遍历 CH0-3 目录下所有 h5 文件
