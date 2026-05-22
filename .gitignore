@@ -4,3 +4,23 @@
 /images/presentation
 /.vscode
 /.VSCodeCounter
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local environments and packaging
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Analysis caches and generated plots
+*.h5
+*.hdf5
+*.png
+*.fig
+python/**/cache/
+python/**/outputs/

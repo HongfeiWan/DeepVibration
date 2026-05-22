@@ -8,18 +8,20 @@ import os
 import sys
 import struct
 import time
+import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
-
-import h5py
-import numpy as np
-import psutil
-import gc
 
 # 添加父目录到路径，以便导入utils模块
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
+from analysis.parallel import add_parallel_arguments, resolve_workers
+import h5py
+import numpy as np
+import psutil
+import gc
+
 from utils.save import save_hdf5
 
 # 定义文件路径和文件名（相对于项目根目录）
@@ -644,13 +646,27 @@ def bin2rawpulse(run_filename, channel_list, event_number, save_path, ch0paramet
             fid.close()
         raise
 
-def main():
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Convert V1725 raw .bin files to HDF5 raw pulses and parameter files."
+    )
+    add_parallel_arguments(parser)
+    parser.add_argument("--run-start", type=int, default=RUN_Start_NUMBER)
+    parser.add_argument("--run-end", type=int, default=RUN_End_NUMBER)
+    parser.add_argument("--filename-input", default=filename_input)
+    parser.add_argument("--event-number", type=int, default=EVENT_NUMBER)
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
     """主函数 - 使用多进程并行处理"""
+    args = parse_args(argv)
+
     # 生成所有任务列表
     tasks = []         # 需要从 bin 读取并生成原始 h5 的任务
     param_tasks = []   # 已有原始 h5，仅需补参数的任务
-    for i in range(RUN_Start_NUMBER, RUN_End_NUMBER + 1):
-        run_filename = os.path.join(read_path, f'{filename_input}FADC_RAW_Data_{i}.bin')
+    for i in range(args.run_start, args.run_end + 1):
+        run_filename = os.path.join(read_path, f'{args.filename_input}FADC_RAW_Data_{i}.bin')
         filename = os.path.basename(run_filename)
         base_name = os.path.splitext(filename)[0]
         # 为每个文件添加任务：AMP通道、TRIGGER通道和NAI通道
@@ -670,7 +686,7 @@ def main():
 
         if not amp_raw_exists:
             # 原始 CH0-3 h5 不存在：必须从 bin 解析
-            tasks.append((run_filename, AMP_CHANNEL_LIST, EVENT_NUMBER, amp_save_path, ch0parameters_save_path))
+            tasks.append((run_filename, AMP_CHANNEL_LIST, args.event_number, amp_save_path, ch0parameters_save_path))
         elif not amp_params_complete:
             # 原始 h5 已有，但参数不全：只补参数
             param_tasks.append((amp_output_file, AMP_CHANNEL_LIST, ch0parameters_save_path))
@@ -686,7 +702,7 @@ def main():
         ch5param_exists = os.path.exists(ch5param_output_file)
         if not trigger_raw_exists:
             # 随机触发原始 h5 不存在：从 bin 解析
-            tasks.append((run_filename, TRIGGER_CHANNEL_LIST, EVENT_NUMBER, trigger_save_path, None))
+            tasks.append((run_filename, TRIGGER_CHANNEL_LIST, args.event_number, trigger_save_path, None))
         elif not ch5param_exists:
             # 仅缺少 CH5_parameters：基于已有 h5 计算
             param_tasks.append((trigger_output_file, TRIGGER_CHANNEL_LIST, None))
@@ -702,7 +718,7 @@ def main():
         ch4param_exists = os.path.exists(ch4param_output_file)
         if not nai_raw_exists:
             # CH4 原始 h5 不存在：从 bin 解析
-            tasks.append((run_filename, NAI_CHANNEL_LIST, EVENT_NUMBER, NAI_save_path, None))
+            tasks.append((run_filename, NAI_CHANNEL_LIST, args.event_number, NAI_save_path, None))
         elif not ch4param_exists:
             # 仅缺少 CH4_parameters：基于已有 h5 计算
             param_tasks.append((nai_output_file, NAI_CHANNEL_LIST, None))
@@ -712,15 +728,13 @@ def main():
                 f'CH4 与 CH4_parameters 文件均已存在'
             )
 
-    # 根据机器内存和 CPU 情况自适应限制并行 worker 数，避免内存爆掉
+    # Default policy: use all CPU cores. Users can still pass --workers N.
     total_mem_gb = psutil.virtual_memory().total / (1024 ** 3)
-    # 粗略估计：每个 worker 预留 ~4GB，如果机器内存较小则至少保留 1 个 worker
-    max_workers_by_mem = max(1, int(total_mem_gb // 4))
     cpu_count = os.cpu_count() or 1
-    max_workers = max(1, min(cpu_count, max_workers_by_mem))
+    max_workers = resolve_workers(args.workers)
 
     print(f'CPU 核心数: {cpu_count}，物理内存: {total_mem_gb:.1f} GB，'
-          f'限制并行 worker 数为: {max_workers}')
+          f'并行 worker 数: {max_workers}')
     print(f'共 {len(tasks)} 个 bin 解析任务，{len(param_tasks)} 个仅参数任务')
 
     start_time = time.time()
@@ -774,4 +788,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

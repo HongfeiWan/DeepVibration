@@ -11,37 +11,39 @@
   - 也可以手动指定某一个 CH0-3 h5 文件，仅对该文件进行处理；
 - 对每个文件：
   - 读取 channel_data 中 CH2 / CH3 的所有事件波形；
-  - 使用全部 CPU 内核 (max_workers=os.cpu_count()) 在“事件维度”并行：
+- 使用 analysis.parallel 的 --workers auto 默认占满全部 CPU：
     * utils.fit._compute_fast_fit_params
     * utils.frequency._compute_fast_highfreq_energy_ratio（内部是基于 FFT 的能量比计算）；
   - 将结果分别写入 data/hdf5/raw_pulse/CH2_parameters / CH3_parameters 目录中，
     文件名与输入 h5 保持一致。
 
 推荐使用方式：
-1) 先用 python/data/preprocessor.py 生成原始 CH0-3 h5；
+1) 先用 python/scripts/preprocess_raw_pulse.py 生成原始 CH0-3 h5；
 2) 再运行本脚本批量处理全部文件：
-   python fit_ch2_ch3_parallel.py
-   （或指定单个文件：python fit_ch2_ch3_parallel.py /path/to/CH0-3/xxxx_processed.h5）
+   python python/scripts/build_parameters.py
+   （或指定单个文件：python python/scripts/build_parameters.py /path/to/CH0-3/xxxx_processed.h5）
 
 同一时刻只跑一个这样的脚本，即可在拟合阶段让每个 h5 文件都独占整机 CPU。
 """
 
 import os
 import sys
+import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from typing import Tuple
 
-import h5py
-import numpy as np
 
-
-# 目录推断：本脚本与 preprocessor.py 同目录，位于 .../python/data
+# 目录推断：本脚本位于 .../python/scripts
 current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)          # .../python
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
 project_root = os.path.dirname(parent_dir)         # 项目根目录
+
+from analysis.parallel import add_parallel_arguments, resolve_workers  # noqa: E402
+import h5py
+import numpy as np
 
 from utils.fit import (  # type: ignore  # noqa: E402
     _compute_fast_fit_params_with_npoints,
@@ -56,6 +58,11 @@ from utils.frequency import (  # type: ignore  # noqa: E402
 ch0_3_dir = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH0-3")
 ch2parameters_save_path = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH2_parameters")
 ch3parameters_save_path = os.path.join(project_root, "data", "hdf5", "raw_pulse", "CH3_parameters")
+WORKERS = "auto"
+
+
+def _worker_count(maximum: int | None = None) -> int:
+    return resolve_workers(WORKERS, maximum=maximum)
 
 
 # -----------------------------------------------------------------------------
@@ -224,7 +231,7 @@ def _fit_one_channel_for_file(
     n_kept = int(mask_valid.sum())
     print(f"通道 {channel_idx}: 基础 cut 通过事件数 = {n_kept} / {n_events}")
 
-    max_workers = os.cpu_count() or 1
+    max_workers = _worker_count()
     print(f"使用 {max_workers} 个 CPU 核并行拟合通道 {channel_idx}。")
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
@@ -380,7 +387,7 @@ def _backfill_spectral_centroid_for_param_dir(param_dir: str, channel_idx: int) 
             continue
 
         sc_array = np.zeros(n_events, dtype=np.float32)
-        max_workers = os.cpu_count() or 1
+        max_workers = _worker_count()
         print(
             f"[补写 spectral_centroid_mhz] 使用 {max_workers} 个 CPU 核，"
             f"为 {os.path.basename(param_path)} 计算 {n_events} 个事件的频谱质心。"
@@ -486,7 +493,7 @@ def _backfill_n_fit_points_for_param_dir(param_dir: str, channel_idx: int) -> No
             continue
 
         n_fit_points = np.zeros(n_events, dtype=np.int32)
-        max_workers = os.cpu_count() or 1
+        max_workers = _worker_count()
         print(
             f"[补写 n_fit_points] 使用 {max_workers} 个 CPU 核，"
             f"为 {os.path.basename(param_path)} 重新计算 {n_events} 个事件的拟合点数。"
@@ -783,7 +790,7 @@ def _backfill_extrema_for_param_dir(param_dir: str, channel_idx: int) -> None:
 
     print(f"[补写 max/min/tmax/tmin] 在 {param_dir} 中找到 {len(files)} 个参数文件，开始检查。")
 
-    worker_count = min(len(files), (os.cpu_count() or 1))
+    worker_count = _worker_count(len(files))
     print(f"[补写 max/min/tmax/tmin] 启用文件级并行，worker={worker_count}。")
 
     with ProcessPoolExecutor(max_workers=worker_count) as executor:
@@ -833,7 +840,7 @@ def _backfill_ped_pedt_for_param_dir(param_dir: str, channel_idx: int, ped_sampl
 
     print(f"[补写 ped/pedt] 在 {param_dir} 中找到 {len(files)} 个参数文件，开始检查。")
 
-    worker_count = min(len(files), (os.cpu_count() or 1))
+    worker_count = _worker_count(len(files))
     print(f"[补写 ped/pedt] 启用文件级并行，worker={worker_count}。")
 
     with ProcessPoolExecutor(max_workers=worker_count) as executor:
@@ -853,15 +860,37 @@ def _backfill_ped_pedt_for_param_dir(param_dir: str, channel_idx: int, ped_sampl
 
 
 
-def main() -> None:
+def parse_args(argv=None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Build CH2/CH3 fit and frequency parameter files from CH0-3 HDF5 files."
+    )
+    parser.add_argument(
+        "h5_file",
+        nargs="?",
+        help="Optional single CH0-3 HDF5 file. Omit for batch mode.",
+    )
+    parser.add_argument(
+        "--skip-backfill",
+        action="store_true",
+        help="Skip supplemental backfills for existing CH2/CH3 parameter files.",
+    )
+    add_parallel_arguments(parser)
+    return parser.parse_args(argv)
+
+
+def main(argv=None) -> None:
     """
     命令行入口：
         1) 批量处理 CH0-3 目录下所有 h5：
-           python fit_ch2_ch3_parallel.py
+           python python/scripts/build_parameters.py
         2) 仅处理指定的某一个 h5：
-           python fit_ch2_ch3_parallel.py /path/to/CH0-3/xxx_processed.h5
+           python python/scripts/build_parameters.py /path/to/CH0-3/xxx_processed.h5
     """
-    if len(sys.argv) == 1:
+    global WORKERS
+    args = parse_args(argv)
+    WORKERS = args.workers
+
+    if args.h5_file is None:
         # 批处理模式：遍历 CH0-3 目录下所有 h5 文件
         if not os.path.isdir(ch0_3_dir):
             raise FileNotFoundError(f"未找到 CH0-3 目录: {ch0_3_dir}")
@@ -886,6 +915,9 @@ def main() -> None:
         print("=" * 60)
         print("所有 CH0-3 文件的 CH2/CH3 拟合处理完成。")
 
+        if args.skip_backfill:
+            return
+
         # 额外一步：为已有的 CH2/CH3 参数文件补写 spectral_centroid_mhz（若缺失）
         print("=" * 60)
         print("开始为 CH2_parameters 补写 spectral_centroid_mhz（如有缺失）。")
@@ -908,20 +940,7 @@ def main() -> None:
         print("所有补写 spectral_centroid_mhz 的任务完成。")
         return
 
-    if len(sys.argv) == 2:
-        # 单文件模式
-        ch0_3_file = sys.argv[1]
-        fit_ch2_ch3_for_file(ch0_3_file)
-        return
-
-    print(
-        "用法:\n"
-        "  1) 批处理 CH0-3 目录下所有 h5：\n"
-        "     python fit_ch2_ch3_parallel.py\n"
-        "  2) 仅处理指定的某一个 h5：\n"
-        "     python fit_ch2_ch3_parallel.py /path/to/CH0-3/xxx_processed.h5\n"
-    )
-    sys.exit(1)
+    fit_ch2_ch3_for_file(args.h5_file)
 
 if __name__ == "__main__":
     main()
