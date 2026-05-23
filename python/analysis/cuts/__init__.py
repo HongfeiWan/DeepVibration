@@ -4,7 +4,7 @@ from .acv import acv_mask, act_mask
 from .basic import (
     CutResult,
     inhibit_mask,
-    physical_mask,
+    pedestal_3sigma_mask,
     rt_mask,
     saturation_mask,
     summarize_mask,
@@ -19,7 +19,7 @@ __all__ = [
     "act_mask",
     "inhibit_mask",
     "mincut_mask",
-    "physical_mask",
+    "pedestal_3sigma_mask",
     "pncut_mask",
     "rt_mask",
     "saturation_mask",

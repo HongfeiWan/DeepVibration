@@ -35,6 +35,7 @@ python/
 │   ├── run_cuts.py              # 批量 Physical / ACT / ACV cut
 │   ├── analyze_signal.py        # FFT / Lomb / Hilbert / Wavelet
 │   ├── run_ml.py                # 参数矩阵 ML 分析
+│   ├── build_event_feature_umap.py # 全参数事件矩阵 + LedoitWolf/Mahalanobis/UMAP
 │   ├── plot_environment.py      # 环境量总览图
 │   └── plot_spectrum.py         # 参数文件能谱绘图
 ├── examples/                   # 独立物理示例
@@ -69,6 +70,16 @@ python/
    - 对单事件波形做 FFT/Lomb/Hilbert/Wavelet
    - 对参数矩阵做 PCA、UMAP、HDBSCAN、GMM 或 LedoitWolf
 
+6. `python/scripts/build_event_feature_umap.py`
+   - 扫描 `data/hdf5/raw_pulse/*_parameters`
+   - 按 run 配对所有 CH 参数文件，拼成事件级 `(n_events, n_features)` 特征矩阵
+   - 缓存 LedoitWolf 收缩协方差、精度矩阵、事件马氏距离和 UMAP 诊断图
+
+7. `python/scripts/run_anomaly_umap_example.py`
+   - 用全参数 Mahalanobis UMAP 做已知异常类验证图
+   - 只给随机触发、过阈值、最小值 3σ 外、前沿基线 3σ 外等 basic-cut 异常着色，其余事件作为灰色背景
+   - 默认异常优先抽样，避免稀有异常在随机抽样中消失
+
 ## Parallel Policy
 
 所有新的批量入口统一使用 `analysis.parallel`：
@@ -77,6 +88,7 @@ python/
 python python/scripts/preprocess_raw_pulse.py --workers auto --chunk-size 1000
 python python/scripts/build_parameters.py --workers auto --chunk-size 1000
 python python/scripts/run_cuts.py --mode act --workers auto --chunk-size 1000
+python python/scripts/build_event_feature_umap.py --stage all --workers auto --chunk-size 10000
 ```
 
 `--workers auto` 默认使用 `os.cpu_count()` 返回的全部逻辑 CPU。需要限制资源时可手动指定：
@@ -87,19 +99,82 @@ python python/scripts/build_parameters.py --workers 8
 
 为了避免多进程和 NumPy/BLAS 底层线程互相抢核，`analysis.parallel` 会默认把每个 worker 进程内的 BLAS 线程数限制为 1，并在 worker 内阻止再开一层进程池。
 
+## Event Matrix + Mahalanobis UMAP
+
+大规模全参数事件分析入口：
+
+```bash
+uv run --extra ml python python/scripts/build_event_feature_umap.py \
+  --stage all \
+  --workers auto \
+  --chunk-size 10000 \
+  --cov-fit-max-events 1000000 \
+  --umap-max-events 200000
+```
+
+默认缓存目录为 `data/cache/event_feature_umap/event_feature_cache.h5`。缓存内容包括：
+
+- `features`: float32 的 `(n_events, n_features)` 事件特征矩阵。
+- `feature_names`, `run_names`, `run_index`, `event_index`, `event_time`: 事件映射和溯源信息。
+- `masks/*`: RT、Inhibit、Physical、ACT、ACV、PN cut、time cut 和 clean 事件标签。
+- `mahalanobis/*`: LedoitWolf 协方差、精度矩阵、标准化均值/尺度和拟合样本索引。
+- `mahalanobis_distance`: 每个事件到 LedoitWolf 全局中心的马氏距离。
+- `umap/*`: Mahalanobis metric UMAP 的抽样索引和二维嵌入。
+
+`--cov-fit-max-events` 和 `--umap-max-events` 控制抽样规模；设为 `0` 表示全量拟合。对 512 x 10000 级别的事件数，不应缓存完整 `N x N` pairwise 马氏距离矩阵，因为它会远超 256GB 内存和常规磁盘容量；当前实现用 LedoitWolf 精度矩阵作为 UMAP 的 Mahalanobis metric，让 UMAP 在内部构建近邻图，同时保留可分批读取的事件矩阵、mask 和距离到中心诊断量。
+
+只重建缓存、只拟合协方差、只画图也可以拆开跑：
+
+```bash
+python python/scripts/build_event_feature_umap.py --stage cache --workers auto --rebuild-cache
+uv run --extra ml python python/scripts/build_event_feature_umap.py --stage fit --cov-fit-max-events 1000000
+uv run --extra ml python python/scripts/build_event_feature_umap.py --stage umap --umap-max-events 200000
+python python/scripts/build_event_feature_umap.py --stage plot --output-dir data/cache/event_feature_umap/plots
+```
+
+### Known-Anomaly UMAP Example
+
+展示 UMAP 是否有物理区分能力时，推荐先用独立 cut 定义已知异常类，再只对这些异常着色：
+
+```bash
+uv run --extra ml python python/scripts/run_anomaly_umap_example.py \
+  --stage all \
+  --workers auto \
+  --chunk-size 100000 \
+  --umap-max-events 200000 \
+  --umap-neighbors 200 \
+  --umap-min-dist 0.002 \
+  --max-events-per-anomaly 20000 \
+  --output-dir data/cache/event_feature_umap/anomaly_umap_nn200_md0002_stratified
+```
+
+这个图的解释逻辑是：UMAP 只使用全参数特征矩阵和 LedoitWolf/Mahalanobis 距离，不使用事件类别标签；类别标签只在画图阶段用于着色。如果随机触发、饱和/过阈值、mincut 3σ 外、前沿基线 3σ 外事件在图上落在孤立簇、边界结构或明显不同的流形分支上，就说明这些低维结构和已有物理筛选具有一致性。
+
 ## Cut Definitions
 
 常用 cut 已集中到 `analysis.cuts`：
 
 ```python
-from analysis.cuts import rt_mask, inhibit_mask, physical_mask, acv_mask, act_mask
+from analysis.cuts import (
+    acv_mask,
+    act_mask,
+    inhibit_mask,
+    pedestal_3sigma_mask,
+    rt_mask,
+    saturation_mask,
+)
 
 rt = rt_mask(max_ch5, threshold=6000.0)
 inhibit = inhibit_mask(ch0_min)
-physical = physical_mask(max_ch5, ch0_min)
+pedestal_ok = pedestal_3sigma_mask(ch0ped_mean, ch1ped_mean, reference_mask=rt)
+not_saturated = saturation_mask(max_ch0, max_ch1, max_adc=16382.0)
 acv = acv_mask(max_ch4, tmax_ch4)
-act = ~acv
+act = act_mask(max_ch4, tmax_ch4)
+physical = (~rt) & (~inhibit)
+basic = physical & pedestal_ok & not_saturated
 ```
+
+基础筛选按物理流程理解为：先识别 `inhibit` 事例（`ch0_min == 0`）和随机触发事例（`max_ch5 > 6000`），用随机触发样本给 CH0/CH1 前沿基线 pedestal 建立 3σ 带并保留带内事件，再剔除 CH0/CH1 过阈值事件（`max_ch0/max_ch1 > 16382`）。NaI 符合定义为 `max_ch4 >= 7060` 且 `delta_t = 40us - tmax_ch4*4ns` 落在 `[1, 16] us` 内，记为 ACT；未触发 NaI 或落在窗口外的事件记为 ACV。
 
 组合流程在 `analysis.pipelines`：
 

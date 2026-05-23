@@ -15,7 +15,7 @@ def acv_mask(
     dt_min_us: float = 1.0,
     dt_max_us: float = 16.0,
 ) -> np.ndarray:
-    """Return True for events passing the anti-coincidence veto."""
+    """Return True for ACV events: no NaI trigger, or NaI trigger outside the coincidence window."""
 
     max_arr = np.asarray(max_ch4, dtype=np.float64).reshape(-1)
     tmax_arr = np.asarray(tmax_ch4, dtype=np.float64).reshape(-1)
@@ -30,7 +30,7 @@ def acv_mask(
 
 
 def act_mask(*args, **kwargs) -> np.ndarray:
-    """ACT candidates are the complement of the ACV-passing mask."""
+    """Return True for ACT events: NaI over threshold and ``delta_t`` inside ``[dt_min, dt_max]``."""
 
     return ~acv_mask(*args, **kwargs)
 

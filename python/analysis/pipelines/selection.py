@@ -6,8 +6,8 @@ from typing import Optional
 
 import numpy as np
 
-from analysis.cuts import CutResult, acv_mask, act_mask
-from analysis.cuts.basic import combine_steps, physical_mask, saturation_mask
+from analysis.cuts import CutResult, acv_mask, act_mask, inhibit_mask, rt_mask
+from analysis.cuts.basic import combine_steps, saturation_mask
 
 
 def run_basic_selection(
@@ -22,7 +22,7 @@ def run_basic_selection(
     """Run the common RT/Inhibit/saturation preselection."""
 
     steps = {
-        "physical": physical_mask(max_ch5, ch0_min, rt_threshold=rt_threshold),
+        "physical": (~rt_mask(max_ch5, rt_threshold)) & (~inhibit_mask(ch0_min)),
     }
     if max_ch0 is not None:
         steps["not_saturated"] = saturation_mask(max_ch0, max_ch1, max_adc=max_adc)

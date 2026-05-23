@@ -10,9 +10,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 
 from analysis.cuts import (  # noqa: E402
     acv_mask,
+    act_mask,
     inhibit_mask,
     mincut_mask,
-    physical_mask,
+    pedestal_3sigma_mask,
     pncut_mask,
     rt_mask,
     saturation_mask,
@@ -26,7 +27,7 @@ class CutTests(unittest.TestCase):
         ch0_min = np.array([10.0, 10.0, 0.0])
         self.assertTrue(np.array_equal(rt_mask(max_ch5), [False, True, False]))
         self.assertTrue(np.array_equal(inhibit_mask(ch0_min), [False, False, True]))
-        self.assertTrue(np.array_equal(physical_mask(max_ch5, ch0_min), [True, False, False]))
+        self.assertTrue(np.array_equal((~rt_mask(max_ch5)) & (~inhibit_mask(ch0_min)), [True, False, False]))
 
     def test_saturation_mask(self) -> None:
         self.assertTrue(
@@ -43,6 +44,14 @@ class CutTests(unittest.TestCase):
         self.assertTrue(np.array_equal(acv_mask(max_ch4, tmax_ch4), [True, True, True]))
         tmax_inside = np.array([0.0, 9000.0, 5000.0])  # delta for event 1 = 4 us.
         self.assertTrue(np.array_equal(acv_mask(max_ch4, tmax_inside), [True, False, True]))
+        self.assertTrue(np.array_equal(act_mask(max_ch4, tmax_inside), [False, True, False]))
+
+    def test_pedestal_3sigma_mask(self) -> None:
+        ch0_ped = np.array([10.0, 10.1, 9.9, 10.0, 20.0])
+        ch1_ped = np.array([30.0, 30.1, 29.9, 30.0, 40.0])
+        reference = np.array([True, True, True, True, False])
+        mask = pedestal_3sigma_mask(ch0_ped, ch1_ped, reference, n_sigma=3, min_fit_events=4)
+        self.assertTrue(np.array_equal(mask, [True, True, True, True, False]))
 
     def test_mincut_mask(self) -> None:
         ch0_min = np.array([10.0, 10.2, 9.8, 30.0])
