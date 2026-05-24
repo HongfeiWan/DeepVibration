@@ -5,10 +5,15 @@
 """
 import os
 import struct
-import numpy as np
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Optional, Tuple
+
 import h5py
+import matplotlib.dates as mdates
+import numpy as np
+
+from .paths import find_project_root, raw_pulse_dir
 
 
 def read_bin_time_span(bin_file_path: str, 
@@ -160,6 +165,50 @@ def read_hdf5_time_span(hdf5_file_path: str,
         end_time = epoch_start + timedelta(seconds=float(last_eventtime))
         
         return start_time, end_time
+
+
+def read_raw_pulse_event_time_mpl(
+    run_name: str | Path,
+    *,
+    project_root: str | Path | None = None,
+    epoch_offset: float = 2.082816000000000e+09,
+) -> np.ndarray:
+    """Read ``CH0-3`` ``time_data`` for one run and convert it to matplotlib dates."""
+
+    root = find_project_root(project_root)
+    ch03_dir = raw_pulse_dir(root) / "CH0-3"
+    run_path = Path(run_name)
+    stem = run_path.stem
+    candidates = [ch03_dir / run_path.name]
+    if stem.endswith("_processed"):
+        candidates.extend([ch03_dir / f"{stem[:-10]}_processed.h5", ch03_dir / f"{stem[:-10]}.h5"])
+    else:
+        candidates.extend([ch03_dir / f"{stem}_processed.h5", ch03_dir / f"{stem}.h5"])
+
+    time_data: np.ndarray | None = None
+    for candidate in dict.fromkeys(candidates):
+        if not candidate.is_file():
+            continue
+        with h5py.File(candidate, "r") as handle:
+            if "time_data" not in handle:
+                continue
+            time_data = np.asarray(handle["time_data"][...], dtype=np.float64)
+            break
+    if time_data is None:
+        raise FileNotFoundError(f"Could not locate CH0-3 time_data for run {run_path.name}")
+    if time_data.size == 0:
+        return np.empty(0, dtype=np.float64)
+
+    event_seconds = np.asarray(time_data, dtype=np.float64) - float(epoch_offset)
+    try:
+        import pandas as pd
+
+        dt_index = pd.to_datetime(event_seconds, unit="s", origin="unix")
+        return np.asarray(mdates.date2num(dt_index.to_pydatetime()), dtype=np.float64)
+    except Exception:
+        epoch = datetime(1970, 1, 1)
+        dt_list = [epoch + timedelta(seconds=float(value)) for value in event_seconds]
+        return np.asarray(mdates.date2num(dt_list), dtype=np.float64)
 
 def get_bin_file_time_span(bin_file_path: str,
                            hdf5_dir: Optional[str] = None,
