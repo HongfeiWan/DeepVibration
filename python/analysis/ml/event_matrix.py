@@ -14,6 +14,7 @@ import numpy as np
 from analysis.cuts import (
     acv_mask,
     act_mask,
+    fit_success_mask,
     inhibit_mask,
     pedestal_3sigma_mask,
     pncut_mask,
@@ -729,9 +730,46 @@ def compute_basic_anomaly_masks(
         tmax_ch4 = _read_feature_column(handle, feature_names, "ch4_tmax_ch4", chunk_size=chunk_size)
         ch0_ped = _read_feature_column(handle, feature_names, "ch0_ch0ped_mean", chunk_size=chunk_size)
         ch1_ped = _read_feature_column(handle, feature_names, "ch1_ch1ped_mean", chunk_size=chunk_size)
+        ch2_n_fit_points = _read_feature_column(
+            handle,
+            feature_names,
+            "ch2_n_fit_points",
+            chunk_size=chunk_size,
+            default=0.0,
+        )
+        ch3_n_fit_points = _read_feature_column(
+            handle,
+            feature_names,
+            "ch3_n_fit_points",
+            chunk_size=chunk_size,
+            default=0.0,
+        )
+        ch2_tanh_p0 = _read_feature_column(
+            handle,
+            feature_names,
+            "ch2_tanh_p0",
+            chunk_size=chunk_size,
+            default=1e6,
+        )
+        ch3_tanh_p0 = _read_feature_column(
+            handle,
+            feature_names,
+            "ch3_tanh_p0",
+            chunk_size=chunk_size,
+            default=1e6,
+        )
 
         rt = rt_mask(max_ch5, threshold=rt_threshold)
         inhibit = inhibit_mask(ch0_min)
+        fit_success, fit_stats = fit_success_mask(
+            ch2_n_fit_points,
+            ch3_n_fit_points,
+            ch2_tanh_p0,
+            ch3_tanh_p0,
+            return_stats=True,
+        )
+        fit_success = np.asarray(fit_success, dtype=bool)
+        fit_failed = ~fit_success
         physical = (~rt) & (~inhibit)
 
         pedestal_ok, pedestal_stats = pedestal_3sigma_mask(
@@ -769,6 +807,7 @@ def compute_basic_anomaly_masks(
         labels = np.zeros(max_ch5.size, dtype=np.int16)
         label_names = [
             "background",
+            "fit_failed",
             "inhibit",
             "random_trigger",
             "pedestal_3sigma_outlier",
@@ -776,11 +815,12 @@ def compute_basic_anomaly_masks(
             "min_3sigma_outlier",
         ]
         for code, mask in (
-            (1, inhibit),
-            (2, rt),
-            (3, pedestal_3sigma),
-            (4, overthreshold),
-            (5, min_3sigma),
+            (1, fit_failed),
+            (2, inhibit),
+            (3, rt),
+            (4, pedestal_3sigma),
+            (5, overthreshold),
+            (6, min_3sigma),
         ):
             labels[(labels == 0) & mask] = code
 
@@ -795,6 +835,8 @@ def compute_basic_anomaly_masks(
         group = parent.create_group(parts[-1])
         string_dtype = h5py.string_dtype("utf-8")
         for name, mask in (
+            ("fit_success", fit_success),
+            ("fit_failed", fit_failed),
             ("inhibit", inhibit),
             ("random_trigger", rt),
             ("pedestal_3sigma_outlier", pedestal_3sigma),
@@ -810,6 +852,8 @@ def compute_basic_anomaly_masks(
         group.attrs["max_adc"] = float(max_adc)
         group.attrs["n_sigma"] = float(n_sigma)
         group.attrs["min_fit_events"] = int(min_fit_events)
+        for key, value in fit_stats.items():
+            group.attrs[f"fit_{key}"] = float(value)
         for prefix, stats in (("ch0_min", ch0_min_stats), ("ch1_min", ch1_min_stats)):
             for key, value in stats.items():
                 group.attrs[f"{prefix}_{key}"] = float(value)
@@ -818,6 +862,8 @@ def compute_basic_anomaly_masks(
 
         return {
             "total_events": float(max_ch5.size),
+            "fit_failed": float(np.count_nonzero(fit_failed)),
+            "fit_success": float(np.count_nonzero(fit_success)),
             "inhibit": float(np.count_nonzero(inhibit)),
             "random_trigger": float(np.count_nonzero(rt)),
             "pedestal_3sigma_outlier": float(np.count_nonzero(pedestal_3sigma)),

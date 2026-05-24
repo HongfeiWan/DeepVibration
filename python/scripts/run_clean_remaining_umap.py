@@ -22,6 +22,7 @@ from analysis.parallel import add_parallel_arguments  # noqa: E402
 
 
 DEFAULT_EXCLUDE_MASKS = (
+    "fit_failed",
     "inhibit",
     "random_trigger",
     "min_3sigma_outlier",
@@ -190,7 +191,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Remove inhibit, RT/random-trigger, min-3sigma, pedestal-3sigma, ACT, "
-            "and over-threshold events, then run an all-feature UMAP on the remaining events."
+            "fit-failed, and over-threshold events, then run an all-feature UMAP on the remaining events."
         )
     )
     parser.add_argument("--project-root", default=None)
@@ -278,7 +279,7 @@ def main(argv=None) -> None:
         output_dir=out_dir,
         title=(
             "Clean remaining all-feature UMAP\n"
-            "removed: inhibit, RT, ACT, min/pedestal 3sigma, over-threshold\n"
+            "removed: fit-failed, inhibit, RT, ACT, min/pedestal 3sigma, over-threshold\n"
             f"n_neighbors={args.umap_neighbors}, min_dist={args.umap_min_dist}"
         ),
         clean_mask_name=args.clean_mask_name,
